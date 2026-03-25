@@ -1,6 +1,6 @@
 {
   "name": "n8n-custom-mcp",
-  "version": "1.0.0",
+  "version": "2.4.0",
   "type": "module",
   "scripts": {
     "build": "tsc",
@@ -8,8 +8,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.1",
-    "axios": "^1.7.9",
-    "zod": "^3.23.8"
+    "axios": "^1.7.9"
   },
   "devDependencies": {
     "@types/node": "^20.12.7",

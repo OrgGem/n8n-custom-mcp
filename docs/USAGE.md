@@ -1,134 +1,180 @@
-# 📖 Hướng dẫn sử dụng nâng cao
+# 📖 Advanced Usage Guide
 
-## Mục lục
+## Table of Contents
 
-- [Kết hợp n8n-skills vào System Prompt](#kết-hợp-n8n-skills-vào-system-prompt)
-- [Các kịch bản sử dụng phổ biến](#các-kịch-bản-sử-dụng-phổ-biến)
+- [The Self-Healing Deploy Loop](#the-self-healing-deploy-loop)
+- [Common Scenarios](#common-scenarios)
 - [Tips & Tricks](#tips--tricks)
+- [System Prompt Template](#system-prompt-template)
 
 ---
 
-## Kết hợp n8n-skills vào System Prompt
+## The Self-Healing Deploy Loop
 
-[czlonkowski/n8n-skills](https://github.com/czlonkowski/n8n-skills) cung cấp 7 bộ kiến thức giúp AI agent tạo workflow chính xác hơn.
+The most powerful pattern enabled by n8n-custom-mcp. An AI agent autonomously builds, tests, and fixes workflows:
 
-### Cách tích hợp
+### Scenario: "Build a Slack notification workflow from a template"
 
-1. Clone repo:
-   ```bash
-   git clone https://github.com/czlonkowski/n8n-skills.git
-   ```
-
-2. Đọc 3 file SKILL.md quan trọng nhất:
-   ```
-   skills/n8n-mcp-tools-expert/SKILL.md     ← Cách dùng MCP tools
-   skills/n8n-workflow-patterns/SKILL.md     ← 5 mẫu workflow chuẩn
-   skills/n8n-expression-syntax/SKILL.md     ← Cú pháp {{ }} trong n8n
-   ```
-
-3. Copy nội dung vào **System Prompt** của Agent trên LobeHub/OpenClaw.
-
-### System Prompt mẫu
-
-```markdown
-# Vai trò
-Bạn là chuyên gia n8n workflow automation với quyền truy cập MCP Server.
-
-# Kiến thức quan trọng
-
-## Webhook Data
-- Dữ liệu LUÔN nằm dưới $json.body
-- ✅ {{ $json.body.email }}
-- ❌ {{ $json.email }}
-
-## Code Node Return Format
-- Bắt buộc: [{json: {key: "value"}}]
-
-## Quy trình làm việc chuẩn
-1. create_workflow → Tạo
-2. activate_workflow → Bật
-3. trigger_webhook (test_mode: true) → Test
-4. list_executions → Kiểm tra
-5. get_execution → Debug nếu lỗi
-6. update_workflow → Sửa
-7. Lặp lại 3-6 cho đến khi OK
 ```
+AI Agent automatically:
+  1. search_templates("slack notification")    → Find community template
+  2. import_template(templateId: 1234)         → Deploy as workflow
+  3. list_credentials(type: "slackApi")        → Find existing Slack creds
+  4. clone_credentials(source: "42", target: "new-id")  → Auto-assign
+  5. validate_workflow(...)                     → Pre-deploy check
+  6. execute_workflow_and_wait(id: "new-id")   → Run + wait for result
+  7. FAILED → get_execution_data(errorsOnly: true)
+     → "Slack channel not found"
+  8. patch_workflow_node(nodeName: "Slack", parameters: {channel: "#general"})
+  9. execute_workflow_and_wait(id: "new-id")   → Verify fix
+  10. SUCCESS ✅
+```
+
+**Key insight**: Steps 7-9 happen autonomously. The agent reads the error, understands it, fixes the specific node, and re-tests — all without human intervention.
 
 ---
 
-## Các kịch bản sử dụng phổ biến
+## Common Scenarios
 
-### Kịch bản 1: Tạo webhook workflow hoàn chỉnh
-
-```
-Prompt: "Tạo webhook nhận POST từ Outlook, lấy subject và sender,
-         gửi thông báo vào Slack channel #notifications"
-```
-
-AI sẽ tự động:
-1. `create_workflow` — Tạo workflow với 3 nodes: Webhook → Set → Slack
-2. `activate_workflow` — Bật workflow
-3. `trigger_webhook` — Test với dữ liệu giả lập
-4. `list_executions` + `get_execution` — Kiểm tra kết quả
-
-### Kịch bản 2: Debug workflow đang lỗi
+### Scenario 1: Debug a failing workflow
 
 ```
-Prompt: "Workflow ID 42 đang bị lỗi, giúp tôi tìm nguyên nhân"
+User: "Workflow ID 42 keeps failing, find and fix the issue"
+
+AI Agent:
+  1. get_workflow_summary(id: "42")
+     → Quick overview: 8 nodes, trigger=schedule, uses Google Sheets + HTTP Request
+  2. get_execution_data(id: latest, errorsOnly: true)
+     → "HTTP Request" node: 401 Unauthorized, httpCode: 401
+  3. list_credentials(type: "httpHeader")
+     → Found: id="15", name="API Token (expired)"
+  4. update_credential(id: "15", type: "httpHeaderAuth", data: {value: "Bearer new-token"})
+  5. execute_workflow_and_wait(id: "42")
+     → SUCCESS ✅
 ```
 
-AI sẽ:
-1. `get_workflow` (id: "42") — Đọc cấu trúc workflow
-2. `list_executions` (workflowId: "42", status: "error") — Tìm lần chạy lỗi
-3. `get_execution` — Đọc error message chi tiết
-4. `update_workflow` — Sửa lỗi
-5. `execute_workflow` — Chạy lại để kiểm tra
-
-### Kịch bản 3: Quản lý hàng loạt
+### Scenario 2: Clone a workflow for another environment
 
 ```
-Prompt: "Liệt kê tất cả workflow đang active, tắt những cái có tên chứa 'test'"
+User: "Duplicate the production email workflow for staging with different credentials"
+
+AI Agent:
+  1. duplicate_workflow(id: "50", name: "Email Workflow (Staging)")
+     → New workflow ID: "75"
+  2. list_credentials(type: "smtp")
+     → Found staging SMTP: id="20"
+  3. patch_workflow_node(workflowId: "75", nodeName: "Send Email",
+       credentials: {smtpAccount: {id: "20", name: "Staging SMTP"}})
+  4. execute_workflow_and_wait(id: "75")
+     → SUCCESS ✅
 ```
 
-AI sẽ:
-1. `list_workflows` (active: true) — Liệt kê
-2. Lọc kết quả tìm workflow có tên chứa "test"
-3. `activate_workflow` (active: false) — Tắt từng cái
+### Scenario 3: Build from scratch with schema discovery
+
+```
+User: "Create a workflow that checks Haravan orders every hour"
+
+AI Agent:
+  1. get_node_schema(nodeType: "n8n-nodes-base.scheduleTrigger")
+     → Knows exact parameter structure for cron
+  2. get_node_schema(nodeType: "n8n-nodes-base.httpRequest")
+     → Knows how to configure HTTP Request
+  3. list_credentials(type: "httpHeader")
+     → Found Haravan API key
+  4. validate_workflow(nodes: [...], connections: {...})
+     → All checks passed
+  5. create_workflow(name: "Haravan Order Check", nodes: [...])
+  6. execute_workflow_and_wait(id: "new-id")
+     → Verify it works
+```
 
 ---
 
 ## Tips & Tricks
 
-### 1. Luôn dùng test_mode khi test webhook
+### 1. Always use `errorsOnly` for debugging
 
 ```json
 {
-  "webhook_path": "your-path",
-  "test_mode": true,      // ← Quan trọng!
-  "body": { "key": "value" }
+  "id": "execution-id",
+  "errorsOnly": true
 }
 ```
 
-`test_mode: true` gửi request vào `/webhook-test/` — n8n sẽ hiển thị data trên Editor UI, rất tiện để debug trực quan.
+This filters to only failed nodes — much faster than reading through 20+ node outputs.
 
-### 2. Debug execution hiệu quả
+### 2. Use `patch_workflow_node` instead of `update_workflow`
 
-Khi `get_execution` trả về lỗi, hãy chú ý:
-- `error.message` — Thông báo lỗi chính
-- `error.node` — Node nào bị lỗi
-- `data.resultData.runData` — Dữ liệu chạy qua từng node
+`update_workflow` replaces the **entire** workflow JSON → risk of corruption.
+`patch_workflow_node` updates **one node** → safe, with before/after verification.
 
-### 3. Kiểm tra node compatibility
+### 3. Use progressive timeout for long workflows
 
-Trước khi tạo workflow dùng node lạ, hãy chạy:
-```
-list_node_types → Kiểm tra xem node đó có cài trên n8n không
-```
-
-### 4. Backup trước khi xoá/sửa
-
-```
-get_workflow → Lưu JSON hiện tại → update_workflow hoặc delete_workflow
+```json
+{
+  "id": "workflow-id",
+  "timeoutSeconds": 300
+}
 ```
 
-AI agent nên được dặn trong System Prompt: "Luôn đọc workflow hiện tại trước khi sửa hoặc xoá."
+Default is 120s (2 min). Max is 600s (10 min). For workflows that process hundreds of items, increase the timeout.
+
+### 4. Use `get_workflow_summary` before editing
+
+Instead of parsing raw JSON from `get_workflow`, use `get_workflow_summary` to quickly understand:
+- What nodes exist and their types
+- Connection flow (A → B → C)
+- What credential types are needed
+- Whether the workflow has a trigger
+
+### 5. Combine `import_template` + `clone_credentials`
+
+When deploying a template that needs the same credentials as an existing workflow:
+
+```
+import_template(templateId: 1234)  → Creates workflow
+clone_credentials(source: "existing-wf", target: "new-wf")  → Auto-assigns creds
+```
+
+This saves 5-10 individual `patch_workflow_node` calls.
+
+---
+
+## System Prompt Template
+
+Add this to your AI agent's system prompt for optimal n8n-custom-mcp usage:
+
+```markdown
+# n8n Workflow Automation Expert
+
+You have access to 34 MCP tools for managing n8n workflows. Follow these rules:
+
+## Workflow Creation
+1. Use `get_node_schema` to learn correct parameters before creating nodes
+2. Always `validate_workflow` before deploying
+3. Use `import_template` when a community template exists for the use case
+
+## Debugging
+1. Start with `get_workflow_summary` to understand the workflow structure
+2. Use `get_execution_data(errorsOnly: true)` for quick root cause analysis
+3. Fix with `patch_workflow_node` (never use `update_workflow` for single-node fixes)
+4. Always re-execute to verify the fix
+
+## Credentials
+1. Check `list_credentials` before creating new ones (avoid duplicates)
+2. Use `clone_credentials` when deploying workflows that share credential types
+3. Use `update_credential` to rotate tokens without breaking workflow references
+
+## Safety
+- Always use `duplicate_workflow` before making risky changes
+- Never `activate_workflow` until verified via `execute_workflow_and_wait`
+- Use `tag_workflow` to categorize (Production, Draft, Testing)
+
+## Webhook Data Access
+- Data is always under `$json.body` for webhook triggers
+- ✅ `{{ $json.body.email }}`
+- ❌ `{{ $json.email }}`
+
+## Code Node Return Format
+- Must return: `[{json: {key: "value"}}]`
+```

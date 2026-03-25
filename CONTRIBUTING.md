@@ -1,8 +1,8 @@
-# 🤝 Đóng góp cho n8n-custom-mcp
+# 🤝 Contributing to n8n-custom-mcp
 
-Cảm ơn bạn đã quan tâm đến việc đóng góp! Mọi contribution đều được chào đón.
+Thank you for your interest in contributing! All contributions are welcome.
 
-## 📋 Quy trình đóng góp
+## 📋 How to Contribute
 
 ### 1. Fork & Clone
 
@@ -12,132 +12,179 @@ cd n8n-custom-mcp
 npm install
 ```
 
-### 2. Tạo branch
+### 2. Create a branch
 
 ```bash
-git checkout -b feature/ten-tinh-nang
-# hoặc
-git checkout -b fix/ten-bug
+git checkout -b feature/your-feature-name
+# or
+git checkout -b fix/your-bug-fix
 ```
 
-### 3. Phát triển
+### 3. Develop
 
 ```bash
-# Chạy dev mode (cần n8n instance)
+# Set environment variables (needs a running n8n instance)
 export N8N_HOST=http://localhost:5678
 export N8N_API_KEY=your_key
-npm run dev
+
+# Build TypeScript
+npm run build
+
+# Run directly
+node dist/index.js
 ```
 
 ### 4. Build & Test
 
 ```bash
-# Build TypeScript
+# TypeScript type check
+npx tsc --noEmit
+
+# Build
 npm run build
 
-# Test với Docker
+# Test with Docker
 docker build -t n8n-custom-mcp-test .
-docker run --rm -e N8N_HOST=http://host.docker.internal:5678 -e N8N_API_KEY=your_key n8n-custom-mcp-test
+docker run --rm \
+  -e N8N_HOST=http://host.docker.internal:5678 \
+  -e N8N_API_KEY=your_key \
+  n8n-custom-mcp-test
 ```
 
 ### 5. Commit & Push
 
 ```bash
 git add .
-git commit -m "feat: mô tả ngắn gọn"
-git push origin feature/ten-tinh-nang
+git commit -m "feat: short description"
+git push origin feature/your-feature-name
 ```
 
-### 6. Tạo Pull Request
+### 6. Create a Pull Request
 
-Mở PR trên GitHub với mô tả rõ ràng về thay đổi.
+Open a PR on GitHub with a clear description of your changes.
 
-## 📁 Cấu trúc dự án
+## 📁 Project Structure
 
 ```
 n8n-custom-mcp/
 ├── src/
-│   └── index.ts          ← Toàn bộ logic MCP server
-├── package.json
+│   └── index.ts             ← All MCP server logic (34 tools, ~1830 lines)
+├── docs/
+│   ├── USAGE.md             ← Advanced usage guide
+│   └── runner-workflow.json ← Required n8n workflow for execution tools
+├── package.json             ← Dependencies (MCP SDK, axios)
 ├── tsconfig.json
-├── Dockerfile            ← Multi-stage build
+├── Dockerfile               ← Multi-stage build (builder + supergateway)
+├── docker-compose.yml
 ├── .env.example
 ├── .gitignore
-├── README.md
+├── CHANGELOG.md
 ├── CONTRIBUTING.md
-├── LICENSE
-└── docs/
-    ├── USAGE.md          ← Hướng dẫn sử dụng nâng cao
-    └── architecture.png  ← Sơ đồ kiến trúc
+├── README.md
+└── LICENSE
 ```
 
-## 🎯 Thêm MCP Tool mới
+### Key Architecture
 
-Khi muốn thêm tool mới, bạn cần sửa 2 chỗ trong `src/index.ts`:
+The server uses **4 axios clients**:
 
-**1. Đăng ký tool** — trong `ListToolsRequestSchema` handler:
+| Client | Base URL | Purpose |
+|:-------|:---------|:--------|
+| `n8n` | `N8N_HOST/api/v1` | Public REST API (workflows, executions, credentials, tags) |
+| `webhookClient` | `N8N_HOST` | Webhook triggers and Runner Bridge execution |
+| `n8nInternal` | `N8N_HOST` | Internal API (`/rest/node-types`) for schema discovery |
+| `n8nTemplates` | `api.n8n.io` | Community templates (public, no auth) |
+
+## 🎯 Adding a New MCP Tool
+
+Two places to edit in `src/index.ts`:
+
+**1. Register the tool** — in the `ListToolsRequestSchema` handler (~line 55):
 
 ```typescript
 {
   name: 'your_new_tool',
-  description: 'Mô tả tool',
+  description: 'Clear description for AI agent consumption',
   inputSchema: {
     type: 'object',
     properties: {
-      param1: { type: 'string', description: 'Mô tả param' },
+      param1: { type: 'string', description: 'What this param does' },
     },
     required: ['param1'],
   },
 },
 ```
 
-**2. Xử lý logic** — trong `CallToolRequestSchema` handler:
+**2. Implement the handler** — in the `CallToolRequestSchema` handler (~line 490):
 
 ```typescript
 if (name === 'your_new_tool') {
   const { param1 } = args as any;
-  const response = await n8n.get(`/your-endpoint/${param1}`);
-  return {
-    content: [{ type: 'text', text: JSON.stringify(response.data, null, 2) }],
-  };
+  try {
+    const response = await n8n.get(`/endpoint/${param1}`);
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          success: true,
+          data: response.data,
+          hint: 'Actionable hint for the AI agent.',
+        }, null, 2)
+      }]
+    };
+  } catch (err: any) {
+    return {
+      isError: true,
+      content: [{
+        type: 'text',
+        text: `Your Tool Error: ${err.response?.data?.message || err.message}`
+      }]
+    };
+  }
 }
 ```
 
-## 📐 Quy ước
+### Best Practices for Tool Handlers
+
+- Always return `{ hint: '...' }` to guide the AI agent on next steps
+- Use `isError: true` for failures (never throw inside handlers)
+- Include contextual error tips based on HTTP status codes
+- Return `before/after` diffs for mutation operations (see `patch_workflow_node`)
+- Use cursor-based pagination for list endpoints that might exceed 100 items
+
+## 📐 Conventions
 
 ### Commit Messages
 
-Sử dụng [Conventional Commits](https://www.conventionalcommits.org/):
+[Conventional Commits](https://www.conventionalcommits.org/):
 
-- `feat:` — Tính năng mới
-- `fix:` — Sửa bug
-- `docs:` — Cập nhật tài liệu
-- `refactor:` — Tái cấu trúc code
-- `chore:` — Việc vặt (CI, dependencies...)
+- `feat:` — New feature
+- `fix:` — Bug fix
+- `docs:` — Documentation update
+- `refactor:` — Code restructure
+- `chore:` — Maintenance (CI, dependencies)
 
 ### Code Style
 
-- TypeScript strict mode
-- Sử dụng `any` khi cần thiết (MCP args là dynamic)
-- Xử lý error đầy đủ — luôn trả về `isError: true` thay vì throw
-- Comment bằng tiếng Việt hoặc tiếng Anh đều OK
+- TypeScript with `any` where needed (MCP args are dynamic)
+- Complete error handling — always return `isError: true`, never throw
+- All tool descriptions should be written for AI agent consumption
 
-## 💡 Ý tưởng đóng góp
+## 💡 Contribution Ideas
 
-Nếu bạn muốn contribute nhưng chưa biết làm gì, đây là một số ý tưởng:
+- [ ] **Deep merge** for `patch_workflow_node` (currently shallow merge for nested params)
+- [ ] **Webhook callback** pattern for workflows >10 minutes
+- [ ] **Unit tests** for each tool handler
+- [ ] **SSE transport** support
+- [ ] **Rate limiting** to prevent API abuse
+- [ ] **Authentication layer** for MCP endpoint
+- [ ] **Workflow diff** tool — compare two workflow versions
+- [ ] **Bulk operations** — activate/deactivate multiple workflows
 
-- [ ] **`search_templates`** — Tìm workflow template từ n8n.io
-- [ ] **`get_credentials`** — Quản lý credentials
-- [ ] **`import_workflow`** / **`export_workflow`** — Import/Export JSON
-- [ ] **SSE Transport** — Hỗ trợ Server-Sent Events
-- [ ] **Unit tests** — Viết test cho từng tool
-- [ ] **Rate limiting** — Giới hạn request tránh abuse
-- [ ] **Authentication** — Thêm auth layer cho MCP endpoint
+## ❓ Questions?
 
-## ❓ Câu hỏi?
-
-Mở [Issue](https://github.com/duyasia/n8n-custom-mcp/issues) trên GitHub hoặc liên hệ qua Discussion.
+Open an [Issue](https://github.com/duyasia/n8n-custom-mcp/issues) on GitHub.
 
 ---
 
-Cảm ơn bạn đã giúp dự án tốt hơn! 🙏
+Thank you for making this project better! 🙏

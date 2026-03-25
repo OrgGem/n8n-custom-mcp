@@ -2,7 +2,7 @@
 
 # 🔌 n8n-custom-mcp
 
-**Full-power MCP Server cho n8n — Dành cho AI Agent thực sự muốn _làm chủ_ workflow.**
+**Full-power MCP Server for n8n — 34 tools for AI agents to build, deploy, debug, and fix workflows autonomously.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/Node.js-≥18-green.svg)](https://nodejs.org/)
@@ -10,93 +10,92 @@
 [![MCP](https://img.shields.io/badge/MCP-Compatible-purple.svg)](https://modelcontextprotocol.io/)
 [![n8n](https://img.shields.io/badge/n8n-API%20v1-orange.svg)](https://docs.n8n.io/api/)
 
-[Tính năng](#-tính-năng) · [Cài đặt](#-cài-đặt-nhanh) · [Cấu hình](#%EF%B8%8F-cấu-hình) · [Sử dụng](#-sử-dụng) · [Đóng góp](#-đóng-góp)
-
----
-
-<img src="https://raw.githubusercontent.com/duyasia/n8n-custom-mcp/main/docs/architecture.png" alt="Architecture" width="700" />
+[Features](#-features) · [Quick Start](#-quick-start) · [Tools](#-tools-34) · [Self-Healing Loop](#-self-healing-deploy-loop) · [Contributing](#-contributing)
 
 </div>
 
-## ❓ Tại sao cần repo này?
+## ❓ Why this exists?
 
-Các MCP Server hiện tại cho n8n (ví dụ [`czlonkowski/n8n-mcp`](https://github.com/czlonkowski/n8n-mcp)) chỉ hỗ trợ **đọc và chạy** workflow. Bạn không thể tạo mới, chỉnh sửa, xoá, hay test webhook từ AI agent.
+Existing n8n MCP servers only support **reading and running** workflows. You can't create, edit, debug, or fix workflows from an AI agent.
 
-**n8n-custom-mcp** giải quyết triệt để vấn đề này bằng cách cung cấp **12 tools** bao phủ toàn bộ vòng đời quản lý workflow:
+**n8n-custom-mcp** solves this by providing **34 tools** covering the entire workflow lifecycle — enabling a fully autonomous **Deploy → Test → Debug → Fix → Redeploy** loop:
 
-| Khả năng | MCP Server khác | n8n-custom-mcp |
+| Capability | Other MCP Servers | n8n-custom-mcp |
 |:---------|:---:|:---:|
-| Liệt kê & Xem workflow | ✅ | ✅ |
-| Chạy workflow | ✅ | ✅ |
-| Bật / Tắt workflow | ✅ | ✅ |
-| **Tạo mới workflow** | ❌ | ✅ |
-| **Sửa workflow** | ❌ | ✅ |
-| **Xoá workflow** | ❌ | ✅ |
-| **Test Webhook** (kể cả test mode) | ❌ | ✅ |
-| **Xem lịch sử execution** | ❌ | ✅ |
-| **Debug chi tiết execution** | ❌ | ✅ |
-| **Liệt kê node types** | ❌ | ✅ |
+| List & View workflows | ✅ | ✅ |
+| Run workflows | ✅ | ✅ |
+| Activate / Deactivate | ✅ | ✅ |
+| **Create workflows** | ❌ | ✅ |
+| **Edit workflows** | ❌ | ✅ |
+| **Surgical node patching** | ❌ | ✅ |
+| **Pre-deploy validation** | ❌ | ✅ |
+| **Execute & wait for results** | ❌ | ✅ |
+| **Deep execution debugging** | ❌ | ✅ |
+| **Credential management** | ❌ | ✅ |
+| **Node schema discovery** | ❌ | ✅ |
+| **Template import** | ❌ | ✅ |
+| **Webhook testing** | ❌ | ✅ |
+| **Tag management** | ❌ | ✅ |
 
-## 🚀 Tính năng
+## 🚀 Features
 
-### 📋 Workflow CRUD
-Tạo, đọc, sửa, xoá workflow hoàn toàn qua MCP — AI agent có thể tự xây dựng workflow từ đầu bằng ngôn ngữ tự nhiên.
+### 🔄 Self-Healing Deploy Loop
+AI agent autonomously: deploy → execute → analyze errors → patch failing nodes → re-execute until success. No human intervention needed.
 
-### 🎯 Webhook Testing
-Tool `trigger_webhook` hỗ trợ:
-- Gọi webhook với bất kỳ HTTP method nào (GET/POST/PUT/DELETE)
-- **Test mode** (`/webhook-test/`) để debug trên n8n Editor
-- **Production mode** (`/webhook/`) cho webhook đang active
-- Custom headers & query parameters
+### 🔧 Surgical Node Editing
+`patch_workflow_node` updates a single node's parameters/credentials without touching the rest of the workflow JSON — eliminating corruption risk.
 
-### 🔍 Execution Debugging
-Theo dõi và debug workflow execution:
-- Liệt kê lịch sử chạy, lọc theo trạng thái (success/error/waiting)
-- Xem chi tiết dữ liệu đầu vào/đầu ra của từng node
-- Đọc error message cụ thể để AI tự sửa lỗi
+### 🔍 Deep Debugging
+`get_execution_data` with `errorsOnly` filter, stack traces, HTTP codes, and item-level error extraction for precise root cause analysis.
+
+### 📋 Schema Discovery
+`get_node_schema` queries n8n's internal API for complete parameter definitions — know exactly what fields any node type accepts.
+
+### 📦 One-Step Template Import
+`import_template` fetches a community template from n8n.io and deploys it as a workflow in one call.
 
 ### 🐳 Docker-Ready
-Đóng gói sẵn Dockerfile multi-stage + [supergateway](https://github.com/nichochar/supergateway) để expose MCP qua HTTP — chỉ cần `docker compose up`.
+Multi-stage Dockerfile with [supergateway](https://github.com/nichochar/supergateway) to expose MCP via HTTP — just `docker compose up`.
 
-## 📦 Cài đặt nhanh
+## 📦 Quick Start
 
-### Yêu cầu
+### Prerequisites
 
 - [Docker](https://docs.docker.com/get-docker/) & [Docker Compose](https://docs.docker.com/compose/install/)
-- n8n instance đang chạy (hoặc chạy cùng docker-compose)
+- n8n instance running (or via same docker-compose)
 - [n8n API Key](https://docs.n8n.io/api/authentication/)
 
-### Bước 1: Clone
+### Step 1: Clone
 
 ```bash
 git clone https://github.com/duyasia/n8n-custom-mcp.git
 cd n8n-custom-mcp
 ```
 
-### Bước 2: Cấu hình biến môi trường
+### Step 2: Configure environment
 
 ```bash
 cp .env.example .env
 ```
 
-Chỉnh sửa file `.env`:
+Edit `.env`:
 
 ```env
-N8N_HOST=http://n8n:5678       # URL nội bộ Docker
-N8N_API_KEY=your_api_key_here  # Tạo tại n8n → Settings → API
+N8N_HOST=http://n8n:5678       # Docker internal URL
+N8N_API_KEY=your_api_key_here  # Create at n8n → Settings → API
 ```
 
-### Bước 3: Chạy
+### Step 3: Run
 
-**Standalone (chỉ MCP server):**
+**Standalone (MCP server only):**
 
 ```bash
 docker compose up -d --build
 ```
 
-**Tích hợp vào n8n stack có sẵn:**
+**Integrate into existing n8n stack:**
 
-Thêm service sau vào file `docker-compose.yml` của bạn:
+Add this service to your `docker-compose.yml`:
 
 ```yaml
 n8n-mcp:
@@ -119,96 +118,121 @@ n8n-mcp:
     --cors
 ```
 
-### Bước 4: Kết nối LobeHub/OpenClaw
+### Step 4: Connect your AI agent
 
-Trong phần cấu hình MCP Plugin:
-
-| Trường | Giá trị |
-|:-------|:--------|
+| Field | Value |
+|:------|:------|
 | Type | MCP (Streamable HTTP) |
-| URL | `http://<IP-máy-chủ>:3000/mcp` |
+| URL | `http://<your-host>:3000/mcp` |
 
-Sau khi kết nối, bạn sẽ thấy **12 tools** xuất hiện. ✅
+You should see **34 tools** available. ✅
 
-## ⚙️ Cấu hình
+## 🛠 Tools (34)
 
-### Biến môi trường
+### Workflow Management (7)
 
-| Biến | Bắt buộc | Mặc định | Mô tả |
-|:-----|:--------:|:---------|:------|
-| `N8N_HOST` | ✅ | `http://localhost:5678` | URL đến n8n instance |
-| `N8N_API_KEY` | ✅ | — | API Key từ n8n Settings |
-| `PORT` | ❌ | `3000` | Port cho MCP HTTP endpoint |
+| Tool | Description |
+|:-----|:-----------|
+| `list_workflows` | List workflows, filter by active status, tags, limit |
+| `get_workflow` | Get full workflow JSON (nodes, connections, settings) |
+| `create_workflow` | Create a new workflow from JSON definition |
+| `update_workflow` | Update an existing workflow |
+| `delete_workflow` | Delete a workflow |
+| `activate_workflow` | Activate or deactivate a workflow |
+| `duplicate_workflow` | Clone a workflow (created inactive) |
 
-### Supergateway Options
+### Execution & Testing (3)
 
-MCP server chạy qua stdio, được wrap bởi [supergateway](https://github.com/nichochar/supergateway) để expose qua HTTP:
+| Tool | Description |
+|:-----|:-----------|
+| `execute_workflow` | Trigger workflow execution via Runner Bridge |
+| `execute_workflow_and_wait` | Execute + auto-poll until complete (max 10 min), return results |
+| `trigger_webhook` | Call webhook endpoints (supports test mode) |
 
-```bash
-supergateway \
-  --stdio "node dist/index.js" \
-  --port 3000 \
-  --outputTransport streamableHttp \
-  --streamableHttpPath /mcp \
-  --cors
+### Debugging & Monitoring (4)
+
+| Tool | Description |
+|:-----|:-----------|
+| `list_executions` | List execution history, filter by status/workflow |
+| `get_execution` | Get full execution details |
+| `get_execution_data` | Per-node forensic data: errors, stack traces, HTTP codes, item errors |
+| `list_node_types` | Discover all node types used across workflows |
+
+### Community Templates (3)
+
+| Tool | Description |
+|:-----|:-----------|
+| `search_templates` | Search n8n.io community templates |
+| `get_template` | Get full template definition for manual import |
+| `import_template` | One-step: fetch template → create workflow |
+
+### Credential Management (5)
+
+| Tool | Description |
+|:-----|:-----------|
+| `list_credentials` | List all credentials (with pagination) |
+| `get_credential_schema` | Discover credential types by scanning workflows |
+| `create_credential` | Create a new credential |
+| `update_credential` | Update credential data without breaking references |
+| `delete_credential` | Delete a credential |
+
+### Node Schema Discovery (2)
+
+| Tool | Description |
+|:-----|:-----------|
+| `get_node_type_details` | Get node config examples from existing workflows (scan-based) |
+| `get_node_schema` | Get official parameter schema from n8n internal API |
+
+### Tag Management (5)
+
+| Tool | Description |
+|:-----|:-----------|
+| `list_tags` | List all tags |
+| `create_tag` | Create a new tag |
+| `update_tag` | Rename a tag |
+| `delete_tag` | Delete a tag |
+| `tag_workflow` | Assign tags to a workflow |
+
+### Surgical Editing & Validation (2)
+
+| Tool | Description |
+|:-----|:-----------|
+| `patch_workflow_node` | Update a single node's params/credentials without touching the rest |
+| `validate_workflow` | Check for structural issues before deploying |
+
+### Productivity (2)
+
+| Tool | Description |
+|:-----|:-----------|
+| `get_workflow_summary` | Human-readable workflow overview (nodes, flow, creds) |
+| `clone_credentials` | Copy credential assignments between workflows by node type |
+
+## 🔄 Self-Healing Deploy Loop
+
+This is the core pattern that makes n8n-custom-mcp powerful. An AI agent can autonomously fix failing workflows:
+
+```
+Agent receives task
+  → get_node_schema          (know correct parameters)
+  → import_template          (start from community template)
+  → list_credentials         (find existing credentials)
+  → clone_credentials        (auto-assign credentials)
+  → validate_workflow        (pre-deploy check)
+  → execute_workflow_and_wait (run + get results in one step)
+  → FAILED?
+      → get_execution_data(errorsOnly: true)   (root cause)
+      → patch_workflow_node                    (fix single node)
+      → execute_workflow_and_wait              (verify fix)
+  → SUCCESS! ✅
 ```
 
-## 💡 Sử dụng
+**Before v2.4.0**: This loop required ~10 tool calls and risked workflow corruption.
+**After v2.4.0**: Only ~5 tool calls with zero corruption risk.
 
-### Danh sách 12 Tools
-
-#### Workflow Management
-
-| Tool | Mô tả |
-|:-----|:------|
-| `list_workflows` | Liệt kê workflows (lọc theo active, limit, tags) |
-| `get_workflow` | Xem chi tiết JSON của workflow |
-| `create_workflow` | Tạo workflow mới từ JSON definition |
-| `update_workflow` | Cập nhật workflow (tên, nodes, connections...) |
-| `delete_workflow` | Xoá workflow |
-| `activate_workflow` | Bật hoặc tắt workflow |
-
-#### Execution & Testing
-
-| Tool | Mô tả |
-|:-----|:------|
-| `execute_workflow` | Chạy workflow theo ID |
-| `trigger_webhook` | Gọi webhook endpoint (hỗ trợ test mode) |
-
-#### Monitoring & Debugging
-
-| Tool | Mô tả |
-|:-----|:------|
-| `list_executions` | Xem lịch sử chạy, lọc theo status/workflow |
-| `get_execution` | Xem chi tiết execution (data, errors) |
-
-#### Discovery
-
-| Tool | Mô tả |
-|:-----|:------|
-| `list_node_types` | Liệt kê các node types đang cài |
-
-### Ví dụ: Tự tạo & test webhook workflow
+## 🏗 Architecture
 
 ```
-Bạn: "Tạo webhook nhận email từ Outlook, lấy subject và sender"
-
-AI tự động thực hiện:
-  1. create_workflow  → Tạo workflow với Webhook + Set node
-  2. activate_workflow → Bật workflow
-  3. trigger_webhook   → Gửi POST test data
-  4. list_executions   → Kiểm tra kết quả
-  5. get_execution     → Đọc output → Xác nhận thành công ✅
-```
-
-### Nâng cao: Kết hợp n8n-skills
-
-Để AI agent thông minh hơn khi tạo workflow, hãy nhúng kiến thức từ [czlonkowski/n8n-skills](https://github.com/czlonkowski/n8n-skills) vào System Prompt. Xem [USAGE.md](docs/USAGE.md) để biết chi tiết.
-
-## 🏗 Kiến trúc
-
-```
-LobeHub / OpenClaw
+AI Agent (Claude, GPT, Gemini, etc.)
        │
        │  MCP (Streamable HTTP)
        ▼
@@ -217,45 +241,58 @@ LobeHub / OpenClaw
 │   (supergateway)     │
 │   :3000/mcp          │
 │                      │
-│   12 MCP Tools       │
+│   34 MCP Tools       │
 │   TypeScript + Axios │
+│   4 API Clients:     │
+│   • n8n REST API     │
+│   • Webhook Client   │
+│   • n8n Internal API │
+│   • n8n.io Templates │
 └──────────┬───────────┘
-           │  REST API (nội bộ Docker)
+           │  REST API (Docker internal)
            ▼
 ┌──────────────────────┐
 │   n8n Instance       │
 │   :5678              │
-│                      │
 │   PostgreSQL + Redis │
 └──────────────────────┘
 ```
 
-## 🔒 Bảo mật
+## ⚙️ Configuration
 
-- ⚠️ **KHÔNG bao giờ** hardcode API Key trong source code
-- File `.env` đã được thêm vào `.gitignore`
-- MCP server giao tiếp với n8n qua mạng Docker nội bộ
-- Webhook client **không** gửi API Key (mô phỏng request từ bên ngoài)
+| Variable | Required | Default | Description |
+|:---------|:--------:|:--------|:-----------|
+| `N8N_HOST` | ✅ | `http://localhost:5678` | URL to n8n instance |
+| `N8N_API_KEY` | ✅ | — | API Key from n8n Settings |
+| `PORT` | ❌ | `3000` | Port for MCP HTTP endpoint |
 
-## 🤝 Đóng góp
+## 🔒 Security
 
-Mọi đóng góp đều được chào đón! Xem [CONTRIBUTING.md](CONTRIBUTING.md) để biết chi tiết.
+- ⚠️ **NEVER** hardcode API keys in source code
+- `.env` is included in `.gitignore`
+- MCP server communicates with n8n via Docker internal network
+- Webhook client does **not** send API keys (simulates external requests)
 
-Một vài ý tưởng:
-- [ ] Thêm `search_templates` — tìm workflow mẫu từ n8n.io
-- [ ] Thêm `get_credentials` — quản lý credentials qua MCP
-- [ ] Hỗ trợ SSE transport
-- [ ] Viết test cases
-- [ ] Thêm tool `import_workflow` / `export_workflow`
+## 🤝 Contributing
+
+All contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+
+Ideas for contribution:
+- [ ] Deep merge for `patch_workflow_node` (currently shallow merge)
+- [ ] Webhook callback pattern for long-running workflows (>10 min)
+- [ ] Unit tests
+- [ ] SSE transport support
+- [ ] Rate limiting
+- [ ] Authentication layer for MCP endpoint
 
 ## 📝 License
 
-[MIT License](LICENSE) — Sử dụng thoải mái, kể cả cho mục đích thương mại.
+[MIT License](LICENSE) — Free for personal and commercial use.
 
 ## 🙏 Credits
 
-- Lấy cảm hứng từ [czlonkowski/n8n-mcp](https://github.com/czlonkowski/n8n-mcp)
-- Kiến thức n8n từ [czlonkowski/n8n-skills](https://github.com/czlonkowski/n8n-skills)
+- Inspired by [czlonkowski/n8n-mcp](https://github.com/czlonkowski/n8n-mcp)
+- n8n knowledge from [czlonkowski/n8n-skills](https://github.com/czlonkowski/n8n-skills)
 - MCP Protocol: [modelcontextprotocol.io](https://modelcontextprotocol.io/)
 - [n8n](https://n8n.io/) — Workflow Automation Platform
 
@@ -263,7 +300,7 @@ Một vài ý tưởng:
 
 <div align="center">
 
-**Nếu thấy hữu ích, hãy ⭐ star repo để ủng hộ!**
+**If useful, please ⭐ star the repo!**
 
 Made with ❤️ by [duyasia](https://github.com/duyasia)
 

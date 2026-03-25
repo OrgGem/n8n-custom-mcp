@@ -8,7 +8,6 @@ import {
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
 import axios from 'axios';
-import { z } from 'zod';
 
 const N8N_HOST = process.env.N8N_HOST || 'http://localhost:5678';
 const N8N_API_KEY = process.env.N8N_API_KEY;
@@ -40,10 +39,19 @@ const n8nTemplates = axios.create({
   },
 });
 
+// n8n Internal API client (same host, no /api/v1 prefix — for node-types endpoint)
+const n8nInternal = axios.create({
+  baseURL: N8N_HOST,
+  headers: {
+    'X-N8N-API-KEY': N8N_API_KEY,
+    'Content-Type': 'application/json',
+  },
+});
+
 const server = new Server(
   {
     name: 'n8n-custom-mcp',
-    version: '2.1.0',
+    version: '2.4.0',
   },
   {
     capabilities: {
@@ -149,7 +157,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       /* EXECUTION & TESTING */
       {
         name: 'execute_workflow',
-        description: 'Manually trigger a workflow execution. Note: only works on active workflows or via internal API.',
+        description: 'Manually trigger a workflow execution using n8n\'s internal API (same as clicking "Test Workflow" in the editor). Works with any workflow — no Runner Workflow needed. Returns execution data directly.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -171,6 +179,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             test_mode: { type: 'boolean', description: 'Use /webhook-test/ endpoint if true' },
           },
           required: ['webhook_path'],
+        },
+      },
+      {
+        name: 'execute_workflow_and_wait',
+        description: 'Execute a workflow and wait for it to complete, then return the execution result. Uses n8n\'s internal API directly — no Runner Workflow needed. Polls execution status until done (success or error). Max wait: 600 seconds (10 minutes). Uses progressive backoff polling.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', description: 'Workflow ID to execute' },
+            inputData: { type: 'object', description: 'Optional input data for the workflow trigger' },
+            timeoutSeconds: { type: 'number', description: 'Max seconds to wait for completion (default: 120, max: 600)', default: 120 },
+            maxItems: { type: 'number', description: 'Max output items per node in results (default: 3)', default: 3 },
+          },
+          required: ['id'],
         },
       },
 
@@ -201,13 +223,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_execution_data',
-        description: 'Get detailed per-node execution data for debugging. Shows what data each node received and produced, execution status, timing, and errors. Essential for identifying which node failed and why.',
+        description: 'Get detailed per-node execution data for debugging. Shows what data each node received and produced, execution status, timing, errors with stack traces and context. Essential for identifying which node failed and why.',
         inputSchema: {
           type: 'object',
           properties: {
             id: { type: 'string', description: 'Execution ID' },
             nodeName: { type: 'string', description: 'Optional: filter to a specific node name to see only its data' },
             maxItems: { type: 'number', description: 'Max output items to return per node (default: 3, use higher for debugging specific data)', default: 3 },
+            errorsOnly: { type: 'boolean', description: 'If true, only return nodes that failed (useful for quick root cause analysis)', default: false },
           },
           required: ['id'],
         },
@@ -299,6 +322,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ['nodeType'],
         },
       },
+      {
+        name: 'get_node_schema',
+        description: 'Get the official parameter schema for an n8n node type from the n8n instance internal API. Unlike get_node_type_details (which scans existing workflows), this returns the complete parameter definition including all available options, defaults, and descriptions. Works for ANY node type, even ones never used in your workflows. Requires n8n to be accessible from the MCP server.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            nodeType: { type: 'string', description: 'Full node type name (e.g. "n8n-nodes-base.httpRequest", "n8n-nodes-base.googleSheets")' },
+            version: { type: 'number', description: 'Optional: specific typeVersion to get schema for (default: latest)' },
+          },
+          required: ['nodeType'],
+        },
+      },
 
       /* TAG MANAGEMENT */
       {
@@ -353,6 +388,99 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             tagIds: { type: 'array', items: { type: 'string' }, description: 'Array of tag IDs to assign (replaces existing tags)' },
           },
           required: ['workflowId', 'tagIds'],
+        },
+      },
+
+      /* CREDENTIALS DISCOVERY (NEW v2.2.0) */
+      {
+        name: 'list_credentials',
+        description: 'List all credentials in n8n. Returns ID, name, type, and creation date for each credential. Essential for discovering existing credentials to reuse in workflows instead of creating duplicates.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            type: { type: 'string', description: 'Optional: filter by credential type name (e.g. "httpHeaderAuth", "oAuth2Api")' },
+          },
+        },
+      },
+      {
+        name: 'update_credential',
+        description: 'Update an existing credential\'s name or data fields without deleting it. This preserves all workflow references to the credential. Use list_credentials to find the credential ID first.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', description: 'Credential ID to update' },
+            name: { type: 'string', description: 'New display name for the credential' },
+            type: { type: 'string', description: 'Credential type (required by n8n API, e.g. "httpHeaderAuth")' },
+            data: { type: 'object', description: 'Updated credential data fields (e.g. { "value": "Bearer new-token" })' },
+          },
+          required: ['id', 'type'],
+        },
+      },
+
+      /* SURGICAL WORKFLOW EDITING (NEW v2.2.0) */
+      {
+        name: 'patch_workflow_node',
+        description: 'Surgically update a single node in a workflow without touching the rest of the workflow JSON. Safely merges parameters, updates credentials, or toggles disabled state. Much safer than update_workflow for single-node fixes. Returns the node before and after patching for verification.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            workflowId: { type: 'string', description: 'Workflow ID containing the node' },
+            nodeName: { type: 'string', description: 'Exact name of the node to patch (e.g. "HTTP Request", "Google Sheets")' },
+            parameters: { type: 'object', description: 'Parameters to merge into the node (shallow merge — only specified keys are updated, others preserved)' },
+            credentials: { type: 'object', description: 'Credentials to set on the node (e.g. { "googleSheetsOAuth2Api": { "id": "123", "name": "My Sheets" } })' },
+            disabled: { type: 'boolean', description: 'Set to true to disable the node, false to enable it' },
+          },
+          required: ['workflowId', 'nodeName'],
+        },
+      },
+      {
+        name: 'validate_workflow',
+        description: 'Validate a workflow structure before deploying it. Checks for common issues: missing node names/types, duplicate node names, orphaned connections, missing trigger nodes. Use this before create_workflow or update_workflow to prevent corruption.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            nodes: { type: 'array', description: 'Array of node objects to validate' },
+            connections: { type: 'object', description: 'Connections object to validate against nodes' },
+          },
+          required: ['nodes'],
+        },
+      },
+
+      /* PRODUCTIVITY TOOLS (NEW v2.4.0) */
+      {
+        name: 'import_template',
+        description: 'Import an n8n community template directly as a new workflow. Fetches the template by ID from n8n.io, creates a workflow from it, and returns the new workflow ID. Combines search_templates + get_template + create_workflow into one step.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            templateId: { type: 'number', description: 'Template ID from search_templates results' },
+            name: { type: 'string', description: 'Optional: custom name for the imported workflow (default: template name)' },
+            activate: { type: 'boolean', description: 'Whether to activate the workflow after import (default: false)', default: false },
+          },
+          required: ['templateId'],
+        },
+      },
+      {
+        name: 'get_workflow_summary',
+        description: 'Get a concise human-readable summary of a workflow structure. Returns node names with types, connection flow, trigger type, credential types used, and settings. Much easier to understand than raw get_workflow JSON. Use this to quickly understand what a workflow does before editing it.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', description: 'Workflow ID to summarize' },
+          },
+          required: ['id'],
+        },
+      },
+      {
+        name: 'clone_credentials',
+        description: 'Copy credential assignments from a source workflow to a target workflow. Matches credentials by node type — for each node in the target that shares the same type as a node in the source, copies the credential reference. Useful when deploying a new workflow that needs the same credentials as an existing one.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            sourceWorkflowId: { type: 'string', description: 'Source workflow ID to copy credentials FROM' },
+            targetWorkflowId: { type: 'string', description: 'Target workflow ID to apply credentials TO' },
+          },
+          required: ['sourceWorkflowId', 'targetWorkflowId'],
         },
       },
     ],
@@ -471,19 +599,47 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (name === 'execute_workflow') {
       const { id, inputData } = args as any;
       try {
-        // Use the [MCP] Workflow Runner webhook to execute any workflow by ID
-        const response = await webhookClient.post('/webhook/mcp-run-workflow', {
-          workflowId: id,
-          ...(inputData || {}),
-        });
+        // Fetch the full workflow definition
+        const wfResponse = await n8n.get(`/workflows/${id}`);
+        const wf = wfResponse.data;
+
+        // Find the trigger/start node
+        const startNode = wf.nodes?.find((n: any) =>
+          (n.type || '').toLowerCase().includes('trigger') ||
+          (n.type || '').toLowerCase().includes('webhook')
+        ) || wf.nodes?.[0];
+
+        // Build the execution payload (same format as n8n Editor UI)
+        const runPayload: any = {
+          workflowData: {
+            ...wf,
+            id: wf.id,
+          },
+          startNodes: startNode ? [{ name: startNode.name, sourceData: null }] : [],
+          runData: {},
+        };
+
+        // If inputData provided, inject it as manual trigger data
+        if (inputData && startNode) {
+          runPayload.runData[startNode.name] = [{
+            startTime: Date.now(),
+            executionTime: 0,
+            executionStatus: 'success',
+            data: { main: [[{ json: inputData }]] },
+            source: [null],
+          }];
+        }
+
+        const response = await n8nInternal.post('/rest/workflows/run', runPayload);
         return {
           content: [{
             type: 'text',
             text: JSON.stringify({
               success: true,
               workflowId: id,
+              executionId: response.data?.data?.executionId || response.data?.executionId || null,
               result: response.data,
-              hint: 'Use list_executions or get_execution_data to inspect the execution details.',
+              hint: 'Use get_execution_data to inspect the execution details.',
             }, null, 2)
           }]
         };
@@ -491,7 +647,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const status = err.response?.status;
         const msg = err.response?.data?.message || err.message;
         let hint = '';
-        if (status === 404) hint = ' The runner workflow may not be active. Check [MCP] Workflow Runner in n8n.';
+        if (status === 401 || status === 403) hint = ' The internal API may require cookie-based auth. Try running MCP server in the same Docker network as n8n.';
         if (status === 500) hint = ' The target workflow may have errors. Use get_execution_data to debug.';
         return { isError: true, content: [{ type: 'text', text: `Execute Workflow Error: ${msg}${hint}` }] };
       }
@@ -519,10 +675,165 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               data: response.data,
               url: `${N8N_HOST}${url}`
             }, null, 2)
-          }]
+          }],
+          isError: response.status >= 400,
         };
       } catch (err: any) {
         return { isError: true, content: [{ type: 'text', text: `Webhook Error: ${err.message}` }] };
+      }
+    }
+
+    // --- EXECUTE AND WAIT (NEW v2.3.0) ---
+    if (name === 'execute_workflow_and_wait') {
+      const { id, inputData, timeoutSeconds = 120, maxItems = 3 } = args as any;
+      const timeout = Math.min(timeoutSeconds, 600); // Max 10 minutes
+
+      try {
+        // Step 0: Record pre-execution state to avoid race condition with old executions
+        const preExecList = await n8n.get('/executions', {
+          params: { workflowId: id, limit: 1 },
+        });
+        const lastExecId = preExecList.data?.data?.[0]?.id || null;
+
+        // Step 1: Fetch workflow definition and execute via internal API
+        const wfResponse = await n8n.get(`/workflows/${id}`);
+        const wf = wfResponse.data;
+
+        const startNode = wf.nodes?.find((n: any) =>
+          (n.type || '').toLowerCase().includes('trigger') ||
+          (n.type || '').toLowerCase().includes('webhook')
+        ) || wf.nodes?.[0];
+
+        const runPayload: any = {
+          workflowData: { ...wf, id: wf.id },
+          startNodes: startNode ? [{ name: startNode.name, sourceData: null }] : [],
+          runData: {},
+        };
+
+        if (inputData && startNode) {
+          runPayload.runData[startNode.name] = [{
+            startTime: Date.now(),
+            executionTime: 0,
+            executionStatus: 'success',
+            data: { main: [[{ json: inputData }]] },
+            source: [null],
+          }];
+        }
+
+        await n8nInternal.post('/rest/workflows/run', runPayload);
+
+        // Step 2: Poll with progressive backoff (2s → 4s → 8s → 10s cap)
+        const backoffIntervals = [2000, 2000, 4000, 4000, 8000]; // first 5 polls
+        const maxInterval = 10000; // cap at 10s for long-running workflows
+        let executionId: string | null = null;
+        let finalExecution: any = null;
+
+        let elapsedMs = 0;
+        for (let attempt = 0; elapsedMs < timeout * 1000; attempt++) {
+          const interval = attempt < backoffIntervals.length ? backoffIntervals[attempt] : maxInterval;
+          await new Promise(resolve => setTimeout(resolve, interval));
+          elapsedMs += interval;
+
+          // Find the latest execution for this workflow
+          const execList = await n8n.get('/executions', {
+            params: { workflowId: id, limit: 1 },
+          });
+          const latestExec = execList.data?.data?.[0];
+
+          if (latestExec && latestExec.id !== lastExecId) {
+            executionId = latestExec.id;
+
+            if (latestExec.status === 'success' || latestExec.status === 'error' || latestExec.status === 'crashed') {
+              // Execution finished - get full data
+              const fullExec = await n8n.get(`/executions/${executionId}`, { params: { includeData: true } });
+              finalExecution = fullExec.data;
+              break;
+            }
+          }
+        }
+
+        if (!finalExecution) {
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                success: false,
+                workflowId: id,
+                executionId,
+                error: `Execution did not complete within ${timeout} seconds.`,
+                hint: executionId
+                  ? `Use get_execution_data with id "${executionId}" to check status later.`
+                  : 'No execution was found. The workflow may not have started. Check if the Runner workflow is active.',
+              }, null, 2)
+            }]
+          };
+        }
+
+        // Step 3: Process results
+        const runData = finalExecution.data?.resultData?.runData || {};
+        const lastError = finalExecution.data?.resultData?.error;
+        const nodeNames = Object.keys(runData);
+
+        const nodeSummaries = nodeNames.map((nName: string) => {
+          const runs = runData[nName];
+          return runs.map((run: any, idx: number) => {
+            const outputData = run.data?.main?.[0] || [];
+            const itemCount = outputData.length;
+            const sampleItems = outputData.slice(0, maxItems).map((item: any) => item.json);
+
+            let errorDetails: any = null;
+            if (run.error) {
+              errorDetails = {
+                message: run.error.message || 'Unknown error',
+                description: run.error.description || null,
+                httpCode: run.error.httpCode || run.error.statusCode || null,
+              };
+            }
+
+            return {
+              nodeName: nName,
+              runIndex: idx,
+              executionStatus: run.executionStatus,
+              executionTime: run.executionTime,
+              itemCount,
+              error: errorDetails,
+              outputSample: sampleItems,
+            };
+          });
+        }).flat();
+
+        const failedNodes = nodeSummaries.filter((n: any) => n.error);
+
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              success: finalExecution.status === 'success',
+              workflowId: id,
+              executionId,
+              status: finalExecution.status,
+              startedAt: finalExecution.startedAt,
+              stoppedAt: finalExecution.stoppedAt,
+              totalNodes: nodeNames.length,
+              failedNodeCount: failedNodes.length,
+              ...(failedNodes.length > 0 ? {
+                errorSummary: failedNodes.map((n: any) => `${n.nodeName}: ${n.error?.message}`).join(' | '),
+              } : {}),
+              ...(lastError ? { workflowError: { message: lastError.message, description: lastError.description } } : {}),
+              nodes: nodeSummaries,
+              hint: finalExecution.status === 'success'
+                ? 'Workflow completed successfully! Review node outputs above.'
+                : 'Workflow failed. Check errorSummary and failed nodes above. Use patch_workflow_node to fix, then execute again.',
+            }, null, 2)
+          }]
+        };
+      } catch (err: any) {
+        const status = err.response?.status;
+        const msg = err.response?.data?.message || err.message;
+        let hint = '';
+        if (status === 404) hint = ' The runner workflow may not be active. Check [MCP] Workflow Runner in n8n.';
+        if (status === 401 || status === 403) hint = ' The internal API may require cookie-based auth. Ensure MCP server is in the same Docker network.';
+        return { isError: true, content: [{ type: 'text', text: `Execute & Wait Error: ${msg}${hint}` }] };
       }
     }
 
@@ -547,20 +858,34 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     if (name === 'get_execution_data') {
-      const { id, nodeName, maxItems = 3 } = args as any;
+      const { id, nodeName, maxItems = 3, errorsOnly = false } = args as any;
       try {
         const response = await n8n.get(`/executions/${id}`, { params: { includeData: true } });
         const exec = response.data;
         const runData = exec.data?.resultData?.runData;
+        const lastError = exec.data?.resultData?.error;
 
         if (!runData) {
-          return { content: [{ type: 'text', text: JSON.stringify({ error: 'No execution data available. The execution may have been pruned or is still running.', executionId: id, status: exec.status }, null, 2) }] };
+          return { content: [{ type: 'text', text: JSON.stringify({
+            error: 'No execution data available. The execution may have been pruned or is still running.',
+            executionId: id,
+            status: exec.status,
+            ...(lastError ? { workflowError: { message: lastError.message, description: lastError.description, stack: lastError.stack?.substring(0, 500) } } : {}),
+          }, null, 2) }] };
         }
 
         const nodeNames = Object.keys(runData);
-        const filteredNames = nodeName
+        let filteredNames = nodeName
           ? nodeNames.filter(n => n.toLowerCase().includes(nodeName.toLowerCase()))
           : nodeNames;
+
+        // If errorsOnly, filter to only nodes with errors
+        if (errorsOnly) {
+          filteredNames = filteredNames.filter(nName => {
+            const runs = runData[nName];
+            return runs.some((run: any) => run.error || run.executionStatus === 'error');
+          });
+        }
 
         const nodeSummaries = filteredNames.map(nName => {
           const runs = runData[nName];
@@ -568,7 +893,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             const outputData = run.data?.main?.[0] || [];
             const itemCount = outputData.length;
             const sampleItems = outputData.slice(0, maxItems).map((item: any) => item.json);
-            const errorMessage = run.error?.message || null;
+
+            // Enhanced error extraction (v2.3.0)
+            let errorDetails: any = null;
+            if (run.error) {
+              errorDetails = {
+                message: run.error.message || 'Unknown error',
+                description: run.error.description || null,
+                stack: run.error.stack?.substring(0, 800) || null,
+                httpCode: run.error.httpCode || run.error.statusCode || null,
+                context: run.error.context || null,
+                cause: run.error.cause?.message || null,
+                nodeType: run.error.node?.type || null,
+              };
+            }
+
+            // Also check for item-level errors
+            const itemErrors = outputData
+              .filter((item: any) => item.error)
+              .slice(0, 3)
+              .map((item: any) => ({
+                message: item.error.message || item.error,
+                json: item.json,
+              }));
 
             return {
               nodeName: nName,
@@ -577,12 +924,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               startTime: run.startTime,
               executionTime: run.executionTime,
               itemCount,
-              error: errorMessage,
+              error: errorDetails,
+              ...(itemErrors.length > 0 ? { itemErrors } : {}),
               outputSample: sampleItems,
               ...(itemCount > maxItems ? { note: `Showing ${maxItems} of ${itemCount} items. Increase maxItems to see more.` } : {}),
             };
           });
         }).flat();
+
+        // Summary of errors for quick diagnosis
+        const failedNodes = nodeSummaries.filter((n: any) => n.error);
 
         return {
           content: [{
@@ -594,6 +945,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               stoppedAt: exec.stoppedAt,
               totalNodes: nodeNames.length,
               showingNodes: filteredNames.length,
+              failedNodeCount: failedNodes.length,
+              ...(failedNodes.length > 0 ? {
+                errorSummary: failedNodes.map((n: any) => `${n.nodeName}: ${n.error?.message}`).join(' | '),
+              } : {}),
+              ...(lastError ? { workflowError: { message: lastError.message, description: lastError.description } } : {}),
               nodes: nodeSummaries,
             }, null, 2)
           }]
@@ -933,6 +1289,82 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
     }
 
+    // --- NODE SCHEMA (NEW v2.3.0) ---
+    if (name === 'get_node_schema') {
+      const { nodeType, version } = args as any;
+      try {
+        // Use internal n8n REST API (not /api/v1) for node type info
+        // This endpoint is used by the n8n frontend and returns full parameter schemas
+        const response = await n8nInternal.post('/rest/node-types', {
+          nodeFilter: { name: nodeType },
+        });
+
+        const nodeTypeData = response.data;
+
+        // If the response is an array, find the matching version
+        let targetNode = nodeTypeData;
+        if (Array.isArray(nodeTypeData)) {
+          targetNode = version
+            ? nodeTypeData.find((n: any) => n.typeVersion === version) || nodeTypeData[0]
+            : nodeTypeData[nodeTypeData.length - 1]; // latest version
+        }
+
+        // Extract useful schema info
+        const schema = {
+          type: targetNode?.name || nodeType,
+          displayName: targetNode?.displayName || null,
+          description: targetNode?.description || null,
+          group: targetNode?.group || null,
+          version: targetNode?.version || targetNode?.typeVersion || null,
+          defaults: targetNode?.defaults || null,
+          inputs: targetNode?.inputs || null,
+          outputs: targetNode?.outputs || null,
+          credentials: targetNode?.credentials?.map((c: any) => ({
+            name: c.name,
+            required: c.required || false,
+            displayName: c.displayName || c.name,
+          })) || [],
+          properties: targetNode?.properties?.map((p: any) => ({
+            name: p.name,
+            displayName: p.displayName,
+            type: p.type,
+            default: p.default,
+            required: p.required || false,
+            description: p.description || null,
+            options: p.options?.map((o: any) => ({
+              name: o.name,
+              value: o.value,
+              description: o.description,
+            }))?.slice(0, 20) || undefined,
+            displayOptions: p.displayOptions || undefined,
+          })) || [],
+        };
+
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              success: true,
+              schema,
+              totalProperties: schema.properties.length,
+              totalCredentials: schema.credentials.length,
+              hint: 'Use these property names and types when configuring nodes via create_workflow or patch_workflow_node. The options arrays show valid values for enum-type parameters.',
+            }, null, 2)
+          }]
+        };
+      } catch (err: any) {
+        const status = err.response?.status;
+        let tip = '';
+        if (status === 404 || status === 400) {
+          tip = ' This endpoint may not be available in your n8n version. Fallback: use get_node_type_details to scan existing workflows for usage examples, or check docs at https://docs.n8n.io/integrations/builtin/';
+        }
+        if (status === 401 || status === 403) {
+          tip = ' The node-types endpoint may require session auth instead of API key. Fallback: use get_node_type_details instead.';
+        }
+        return { isError: true, content: [{ type: 'text', text: `Node Schema Error: ${err.response?.data?.message || err.message}${tip}` }] };
+      }
+    }
+
     // --- TAG MANAGEMENT ---
     if (name === 'list_tags') {
       try {
@@ -986,10 +1418,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const current = await n8n.get(`/workflows/${workflowId}`);
         const wf = current.data;
 
-        // Update workflow with new tags
+        // Update workflow with new tags (strip id/versionId to avoid PUT conflicts)
         const tags = tagIds.map((id: string) => ({ id }));
+        const { id: _id, versionId: _v, ...updateBody } = wf;
         const response = await n8n.put(`/workflows/${workflowId}`, {
-          ...wf,
+          ...updateBody,
           tags,
         });
 
@@ -1006,6 +1439,456 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       } catch (err: any) {
         return { isError: true, content: [{ type: 'text', text: `Tag Workflow Error: ${err.response?.data?.message || err.message}` }] };
+      }
+    }
+
+    // --- CREDENTIALS DISCOVERY (NEW v2.2.0) ---
+    if (name === 'list_credentials') {
+      try {
+        const { type: credType } = (args || {}) as any;
+        // Paginate through all credentials
+        const allCredentials: any[] = [];
+        let cursor: string | undefined;
+        do {
+          const params: any = { limit: 100 };
+          if (cursor) params.cursor = cursor;
+          const response = await n8n.get('/credentials', { params });
+          allCredentials.push(...(response.data.data || []));
+          cursor = response.data.nextCursor;
+        } while (cursor);
+
+        let credentials = allCredentials.map((c: any) => ({
+          id: c.id,
+          name: c.name,
+          type: c.type,
+          createdAt: c.createdAt,
+          updatedAt: c.updatedAt,
+        }));
+
+        // Filter by type if specified
+        if (credType) {
+          const search = credType.toLowerCase();
+          credentials = credentials.filter((c: any) => c.type.toLowerCase().includes(search));
+        }
+
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              total: credentials.length,
+              credentials,
+              hint: 'Use the credential ID when configuring nodes. Use update_credential to modify existing credentials without breaking workflow references.',
+            }, null, 2)
+          }]
+        };
+      } catch (err: any) {
+        return { isError: true, content: [{ type: 'text', text: `List Credentials Error: ${err.response?.data?.message || err.message}. Tip: Ensure your API key has credential:list scope.` }] };
+      }
+    }
+
+    if (name === 'update_credential') {
+      const { id, name: credName, type: credType, data } = args as any;
+      try {
+        const body: any = { type: credType };
+        if (credName) body.name = credName;
+        if (data) body.data = data;
+
+        const response = await n8n.patch(`/credentials/${id}`, body);
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              success: true,
+              credential: {
+                id: response.data.id,
+                name: response.data.name,
+                type: response.data.type,
+                updatedAt: response.data.updatedAt,
+              },
+              hint: 'Credential updated. All workflows referencing this credential ID will automatically use the new values.',
+            }, null, 2)
+          }]
+        };
+      } catch (err: any) {
+        const status = err.response?.status;
+        let tip = '';
+        if (status === 404) tip = ' Tip: Credential ID not found. Use list_credentials to find valid IDs.';
+        if (status === 403) tip = ' Tip: API key may lack credential:update scope.';
+        if (status === 400) tip = ' Tip: The "type" field is required and must match the credential\'s actual type.';
+        return { isError: true, content: [{ type: 'text', text: `Update Credential Error: ${err.response?.data?.message || err.message}${tip}` }] };
+      }
+    }
+
+    // --- SURGICAL WORKFLOW EDITING (NEW v2.2.0) ---
+    if (name === 'patch_workflow_node') {
+      const { workflowId, nodeName, parameters, credentials, disabled } = args as any;
+      try {
+        // 1. Fetch current workflow
+        const current = await n8n.get(`/workflows/${workflowId}`);
+        const wf = current.data;
+
+        // 2. Find the target node by name
+        const nodeIndex = wf.nodes.findIndex((n: any) => n.name === nodeName);
+        if (nodeIndex === -1) {
+          const availableNodes = wf.nodes.map((n: any) => n.name);
+          return {
+            isError: true,
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                error: `Node "${nodeName}" not found in workflow "${wf.name}".`,
+                availableNodes,
+                hint: 'Use one of the available node names listed above. Names are case-sensitive.',
+              }, null, 2)
+            }]
+          };
+        }
+
+        // 3. Save snapshot of original node for diff
+        const originalNode = JSON.parse(JSON.stringify(wf.nodes[nodeIndex]));
+
+        // 4. Apply patches (shallow merge for parameters)
+        if (parameters) {
+          wf.nodes[nodeIndex].parameters = {
+            ...wf.nodes[nodeIndex].parameters,
+            ...parameters,
+          };
+        }
+        if (credentials) {
+          wf.nodes[nodeIndex].credentials = {
+            ...wf.nodes[nodeIndex].credentials,
+            ...credentials,
+          };
+        }
+        if (disabled !== undefined) {
+          wf.nodes[nodeIndex].disabled = disabled;
+        }
+
+        // 5. Push updated workflow back
+        const { id: _id, versionId: _v, ...updateBody } = wf;
+        const response = await n8n.put(`/workflows/${workflowId}`, updateBody);
+
+        // 6. Find the patched node in response for verification
+        const patchedNode = response.data.nodes.find((n: any) => n.name === nodeName);
+
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              success: true,
+              workflow: { id: response.data.id, name: response.data.name },
+              nodeName,
+              before: {
+                parameters: originalNode.parameters,
+                credentials: originalNode.credentials || null,
+                disabled: originalNode.disabled || false,
+              },
+              after: {
+                parameters: patchedNode?.parameters,
+                credentials: patchedNode?.credentials || null,
+                disabled: patchedNode?.disabled || false,
+              },
+              hint: 'Node patched successfully. Use execute_workflow to test the fix, then get_execution_data to verify.',
+            }, null, 2)
+          }]
+        };
+      } catch (err: any) {
+        return { isError: true, content: [{ type: 'text', text: `Patch Node Error: ${err.response?.data?.message || err.message}` }] };
+      }
+    }
+
+    if (name === 'validate_workflow') {
+      const { nodes, connections } = args as any;
+      try {
+        const issues: string[] = [];
+        const nodeNames = new Set<string>();
+
+        if (!nodes || !Array.isArray(nodes) || nodes.length === 0) {
+          issues.push('CRITICAL: No nodes provided. A workflow must have at least one node.');
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({ valid: false, issueCount: issues.length, issues }, null, 2)
+            }]
+          };
+        }
+
+        // Check each node
+        for (let i = 0; i < nodes.length; i++) {
+          const node = nodes[i];
+          if (!node.name) issues.push(`ERROR: Node at index ${i} has no 'name' field.`);
+          if (!node.type) issues.push(`ERROR: Node "${node.name || `index:${i}`}" has no 'type' field.`);
+          if (node.name && nodeNames.has(node.name)) {
+            issues.push(`ERROR: Duplicate node name "${node.name}". Each node must have a unique name.`);
+          }
+          if (node.name) nodeNames.add(node.name);
+          if (!node.position) issues.push(`WARNING: Node "${node.name || `index:${i}`}" has no 'position'. n8n may auto-position it.`);
+          if (node.typeVersion === undefined) issues.push(`WARNING: Node "${node.name || `index:${i}`}" has no 'typeVersion'. n8n may use default version.`);
+        }
+
+        // Check for trigger node
+        const triggerTypes = ['n8n-nodes-base.manualTrigger', 'n8n-nodes-base.scheduleTrigger',
+          'n8n-nodes-base.webhook', 'n8n-nodes-base.executeWorkflowTrigger',
+          'n8n-nodes-base.cronTrigger', 'n8n-nodes-base.emailTrigger'];
+        const hasTrigger = nodes.some((n: any) =>
+          triggerTypes.some(t => (n.type || '').toLowerCase().includes(t.split('.')[1].toLowerCase())) ||
+          (n.type || '').toLowerCase().includes('trigger')
+        );
+        if (!hasTrigger) {
+          issues.push('WARNING: No trigger node found. Workflow cannot be activated without a trigger (webhook, schedule, manual, etc).');
+        }
+
+        // Validate connections reference existing nodes
+        if (connections && typeof connections === 'object') {
+          for (const [sourceName, targets] of Object.entries(connections as Record<string, any>)) {
+            if (!nodeNames.has(sourceName)) {
+              issues.push(`ERROR: Connection source "${sourceName}" does not match any node name.`);
+            }
+            // Check target references
+            const mainTargets = (targets as any)?.main;
+            if (Array.isArray(mainTargets)) {
+              for (const outputGroup of mainTargets) {
+                if (Array.isArray(outputGroup)) {
+                  for (const conn of outputGroup) {
+                    if (conn.node && !nodeNames.has(conn.node)) {
+                      issues.push(`ERROR: Connection target "${conn.node}" (from "${sourceName}") does not match any node name.`);
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        const valid = !issues.some(i => i.startsWith('ERROR') || i.startsWith('CRITICAL'));
+
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              valid,
+              totalNodes: nodes.length,
+              issueCount: issues.length,
+              issues: issues.length > 0 ? issues : ['All checks passed.'],
+              hint: valid
+                ? 'Workflow structure looks valid. Safe to deploy with create_workflow or update_workflow.'
+                : 'Fix the ERROR/CRITICAL issues before deploying. WARNING items are recommendations.',
+            }, null, 2)
+          }]
+        };
+      } catch (err: any) {
+        return { isError: true, content: [{ type: 'text', text: `Validate Workflow Error: ${err.message}` }] };
+      }
+    }
+
+    // --- PRODUCTIVITY TOOLS (NEW v2.4.0) ---
+    if (name === 'import_template') {
+      const { templateId, name: customName, activate = false } = args as any;
+      try {
+        // Step 1: Fetch template from n8n.io
+        const templateResp = await n8nTemplates.get(`/workflows/${templateId}`);
+        const template = templateResp.data.workflow;
+
+        if (!template?.workflow?.nodes) {
+          return { isError: true, content: [{ type: 'text', text: `Import Template Error: Template ${templateId} has no workflow data.` }] };
+        }
+
+        // Step 2: Create workflow from template
+        const workflowData = {
+          name: customName || template.name || `Imported Template #${templateId}`,
+          nodes: template.workflow.nodes,
+          connections: template.workflow.connections || {},
+          settings: template.workflow.settings || {},
+          active: false,
+        };
+
+        const created = await n8n.post('/workflows', workflowData);
+
+        // Step 3: Activate if requested
+        if (activate && created.data.id) {
+          await n8n.post(`/workflows/${created.data.id}/activate`);
+        }
+
+        // Extract credential types needed
+        const credTypesNeeded = new Set<string>();
+        for (const node of template.workflow.nodes) {
+          if (node.credentials) {
+            for (const credType of Object.keys(node.credentials)) {
+              credTypesNeeded.add(credType);
+            }
+          }
+        }
+
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              success: true,
+              templateId,
+              templateName: template.name,
+              workflow: {
+                id: created.data.id,
+                name: created.data.name,
+                active: activate,
+                nodeCount: template.workflow.nodes.length,
+              },
+              credentialTypesNeeded: [...credTypesNeeded],
+              templateUrl: `https://n8n.io/workflows/${templateId}`,
+              hint: credTypesNeeded.size > 0
+                ? `This template requires ${credTypesNeeded.size} credential type(s): ${[...credTypesNeeded].join(', ')}. Use list_credentials to find matching credentials, then patch_workflow_node to assign them.`
+                : 'Template imported successfully. No credentials needed.',
+            }, null, 2)
+          }]
+        };
+      } catch (err: any) {
+        return { isError: true, content: [{ type: 'text', text: `Import Template Error: ${err.response?.data?.message || err.message}` }] };
+      }
+    }
+
+    if (name === 'get_workflow_summary') {
+      const { id } = args as any;
+      try {
+        const response = await n8n.get(`/workflows/${id}`);
+        const wf = response.data;
+        const nodes = wf.nodes || [];
+        const connections = wf.connections || {};
+
+        // Build node list with types
+        const nodeList = nodes.map((n: any) => ({
+          name: n.name,
+          type: n.type?.split('.').pop() || n.type,
+          fullType: n.type,
+          disabled: n.disabled || false,
+          hasCredentials: !!n.credentials,
+        }));
+
+        // Find trigger node
+        const triggerNode = nodes.find((n: any) => (n.type || '').toLowerCase().includes('trigger'));
+
+        // Build connection flow (simplified)
+        const flow: string[] = [];
+        for (const [source, targets] of Object.entries(connections as Record<string, any>)) {
+          const mainTargets = targets?.main;
+          if (Array.isArray(mainTargets)) {
+            for (const outputGroup of mainTargets) {
+              if (Array.isArray(outputGroup)) {
+                for (const conn of outputGroup) {
+                  if (conn.node) {
+                    flow.push(`${source} → ${conn.node}`);
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        // Extract unique credential types
+        const credTypes = new Set<string>();
+        for (const node of nodes) {
+          if (node.credentials) {
+            for (const ct of Object.keys(node.credentials)) {
+              credTypes.add(ct);
+            }
+          }
+        }
+
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              id: wf.id,
+              name: wf.name,
+              active: wf.active,
+              triggerType: triggerNode ? triggerNode.type?.split('.').pop() : 'none',
+              nodeCount: nodes.length,
+              nodes: nodeList,
+              connectionFlow: flow,
+              credentialTypes: [...credTypes],
+              settings: {
+                executionOrder: wf.settings?.executionOrder || 'default',
+                errorWorkflow: wf.settings?.errorWorkflow || null,
+                timezone: wf.settings?.timezone || null,
+              },
+              tags: wf.tags?.map((t: any) => t.name) || [],
+              updatedAt: wf.updatedAt,
+              hint: `Workflow has ${nodes.length} nodes with ${flow.length} connections. ${credTypes.size > 0 ? `Uses ${credTypes.size} credential type(s).` : 'No credentials needed.'}`,
+            }, null, 2)
+          }]
+        };
+      } catch (err: any) {
+        return { isError: true, content: [{ type: 'text', text: `Workflow Summary Error: ${err.response?.data?.message || err.message}` }] };
+      }
+    }
+
+    if (name === 'clone_credentials') {
+      const { sourceWorkflowId, targetWorkflowId } = args as any;
+      try {
+        // Fetch both workflows
+        const [sourceResp, targetResp] = await Promise.all([
+          n8n.get(`/workflows/${sourceWorkflowId}`),
+          n8n.get(`/workflows/${targetWorkflowId}`),
+        ]);
+        const sourceWf = sourceResp.data;
+        const targetWf = targetResp.data;
+
+        // Build credential map from source: nodeType → credentials
+        const credMap: Record<string, any> = {};
+        for (const node of sourceWf.nodes || []) {
+          if (node.credentials && node.type) {
+            credMap[node.type] = node.credentials;
+          }
+        }
+
+        // Apply credentials to matching target nodes
+        let patchedCount = 0;
+        const patches: { nodeName: string; nodeType: string; credentials: any }[] = [];
+
+        for (const node of targetWf.nodes || []) {
+          if (node.type && credMap[node.type]) {
+            node.credentials = { ...node.credentials, ...credMap[node.type] };
+            patchedCount++;
+            patches.push({
+              nodeName: node.name,
+              nodeType: node.type?.split('.').pop(),
+              credentials: credMap[node.type],
+            });
+          }
+        }
+
+        if (patchedCount === 0) {
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                success: false,
+                message: 'No matching node types found between source and target workflows.',
+                sourceNodeTypes: [...new Set(sourceWf.nodes?.filter((n: any) => n.credentials).map((n: any) => n.type))],
+                targetNodeTypes: [...new Set(targetWf.nodes?.map((n: any) => n.type))],
+                hint: 'Credentials are copied by matching node types. Use patch_workflow_node to manually assign credentials to specific nodes.',
+              }, null, 2)
+            }]
+          };
+        }
+
+        // Save updated target workflow
+        const { id: _id, versionId: _v, ...updateBody } = targetWf;
+        const updated = await n8n.put(`/workflows/${targetWorkflowId}`, updateBody);
+
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              success: true,
+              source: { id: sourceWf.id, name: sourceWf.name },
+              target: { id: updated.data.id, name: updated.data.name },
+              patchedNodes: patchedCount,
+              patches,
+              hint: `Cloned credentials to ${patchedCount} node(s). Use execute_workflow_and_wait to test the target workflow.`,
+            }, null, 2)
+          }]
+        };
+      } catch (err: any) {
+        return { isError: true, content: [{ type: 'text', text: `Clone Credentials Error: ${err.response?.data?.message || err.message}` }] };
       }
     }
 
