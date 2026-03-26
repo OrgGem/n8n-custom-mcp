@@ -2,7 +2,7 @@
 
 # 🔌 n8n-custom-mcp
 
-**Full-power MCP Server for n8n — 34 tools for AI agents to build, deploy, debug, and fix workflows autonomously.**
+**Full-power MCP Server for n8n — 36 tools for AI agents to build, deploy, debug, and fix workflows autonomously.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/Node.js-≥18-green.svg)](https://nodejs.org/)
@@ -10,7 +10,7 @@
 [![MCP](https://img.shields.io/badge/MCP-Compatible-purple.svg)](https://modelcontextprotocol.io/)
 [![n8n](https://img.shields.io/badge/n8n-API%20v1-orange.svg)](https://docs.n8n.io/api/)
 
-[Features](#-features) · [Quick Start](#-quick-start) · [Tools](#-tools-34) · [Self-Healing Loop](#-self-healing-deploy-loop) · [Contributing](#-contributing)
+[Features](#-features) · [Quick Start](#-quick-start) · [Tools](#-tools-36) · [Self-Healing Loop](#-self-healing-deploy-loop) · [Contributing](#-contributing)
 
 </div>
 
@@ -18,7 +18,7 @@
 
 Existing n8n MCP servers only support **reading and running** workflows. You can't create, edit, debug, or fix workflows from an AI agent.
 
-**n8n-custom-mcp** solves this by providing **34 tools** covering the entire workflow lifecycle — enabling a fully autonomous **Deploy → Test → Debug → Fix → Redeploy** loop:
+**n8n-custom-mcp** solves this by providing **36 tools** covering the entire workflow lifecycle — enabling a fully autonomous **Deploy → Diagnose → Test → Debug → Fix → Redeploy** loop:
 
 | Capability | Other MCP Servers | n8n-custom-mcp |
 |:---------|:---:|:---:|
@@ -36,6 +36,9 @@ Existing n8n MCP servers only support **reading and running** workflows. You can
 | **Template import** | ❌ | ✅ |
 | **Webhook testing** | ❌ | ✅ |
 | **Tag management** | ❌ | ✅ |
+| **Deep workflow diagnosis** | ❌ | ✅ |
+| **Node version discovery** | ❌ | ✅ |
+| **Execution cleanup** | ❌ | ✅ |
 
 ## 🚀 Features
 
@@ -125,9 +128,9 @@ n8n-mcp:
 | Type | MCP (Streamable HTTP) |
 | URL | `http://<your-host>:3000/mcp` |
 
-You should see **34 tools** available. ✅
+You should see **36 tools** available. ✅
 
-## 🛠 Tools (34)
+## 🛠 Tools (36)
 
 ### Workflow Management (7)
 
@@ -146,16 +149,17 @@ You should see **34 tools** available. ✅
 | Tool | Description |
 |:-----|:-----------|
 | `execute_workflow` | Trigger workflow execution via Runner Bridge |
-| `execute_workflow_and_wait` | Execute + auto-poll until complete (max 10 min), return results |
+| `execute_workflow_and_wait` | Execute via internal API + auto-poll until complete (max 10 min) |
 | `trigger_webhook` | Call webhook endpoints (supports test mode) |
 
-### Debugging & Monitoring (4)
+### Debugging & Monitoring (5)
 
 | Tool | Description |
 |:-----|:-----------|
 | `list_executions` | List execution history, filter by status/workflow |
 | `get_execution` | Get full execution details |
 | `get_execution_data` | Per-node forensic data: errors, stack traces, HTTP codes, item errors |
+| `delete_execution` | Delete stuck/zombie executions (single or bulk) |
 | `list_node_types` | Discover all node types used across workflows |
 
 ### Community Templates (3)
@@ -176,12 +180,13 @@ You should see **34 tools** available. ✅
 | `update_credential` | Update credential data without breaking references |
 | `delete_credential` | Delete a credential |
 
-### Node Schema Discovery (2)
+### Node Schema Discovery (3)
 
 | Tool | Description |
 |:-----|:-----------|
 | `get_node_type_details` | Get node config examples from existing workflows (scan-based) |
 | `get_node_schema` | Get official parameter schema from n8n internal API |
+| `get_node_versions` | Discover all available typeVersions for a node type (latest + history) |
 
 ### Tag Management (5)
 
@@ -193,12 +198,13 @@ You should see **34 tools** available. ✅
 | `delete_tag` | Delete a tag |
 | `tag_workflow` | Assign tags to a workflow |
 
-### Surgical Editing & Validation (2)
+### Surgical Editing & Validation (3)
 
 | Tool | Description |
 |:-----|:-----------|
 | `patch_workflow_node` | Update a single node's params/credentials without touching the rest |
 | `validate_workflow` | Check for structural issues before deploying |
+| `diagnose_workflow` | Deep health check: credentials, sandbox, versions, connections, orphans |
 
 ### Productivity (2)
 
@@ -213,11 +219,12 @@ This is the core pattern that makes n8n-custom-mcp powerful. An AI agent can aut
 
 ```
 Agent receives task
-  → get_node_schema          (know correct parameters)
-  → import_template          (start from community template)
-  → list_credentials         (find existing credentials)
-  → clone_credentials        (auto-assign credentials)
-  → validate_workflow        (pre-deploy check)
+  → get_node_versions         (get latest typeVersion — CRITICAL)
+  → get_node_schema           (know correct parameters)
+  → import_template           (start from community template)
+  → list_credentials          (find existing credentials)
+  → clone_credentials         (auto-assign credentials)
+  → diagnose_workflow         (deep pre-execute check — NEW v2.5.0)
   → execute_workflow_and_wait (run + get results in one step)
   → FAILED?
       → get_execution_data(errorsOnly: true)   (root cause)
@@ -226,8 +233,9 @@ Agent receives task
   → SUCCESS! ✅
 ```
 
-**Before v2.4.0**: This loop required ~10 tool calls and risked workflow corruption.
-**After v2.4.0**: Only ~5 tool calls with zero corruption risk.
+**v1.0**: 12 tools, manual everything.
+**v2.4.0**: 33 tools, self-healing loop with zero corruption risk.
+**v2.5.0**: 36 tools, diagnose-first pattern + node version safety.
 
 ## 🏗 Architecture
 
@@ -241,7 +249,7 @@ AI Agent (Claude, GPT, Gemini, etc.)
 │   (supergateway)     │
 │   :3000/mcp          │
 │                      │
-│   34 MCP Tools       │
+│   36 MCP Tools       │
 │   TypeScript + Axios │
 │   4 API Clients:     │
 │   • n8n REST API     │

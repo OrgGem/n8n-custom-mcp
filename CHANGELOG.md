@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [2.5.0] - 2025-03-26
+
+### Added
+- **`delete_execution`** — Delete one or more executions by ID. Supports single and bulk deletion. Essential for cleaning up stuck/zombie executions (`finished: false`) that block new executions
+- **`get_node_versions`** — Discover all available `typeVersion` values for any node type. Uses dual strategy: n8n internal API schema + workflow scan. Returns `recommendedVersion`, `allKnownVersions`, and usage examples. Prevents invisible errors from using outdated typeVersions
+- **`diagnose_workflow`** — Deep health check of a deployed workflow across 7 categories:
+  1. Structural validation (duplicate names, missing fields)
+  2. Connection integrity (orphan nodes, broken references)
+  3. Credential existence verification (checks IDs against n8n credential store)
+  4. Missing credential detection (nodes that require but lack credentials)
+  5. Code node sandbox compatibility (detects `fetch()`, `require()`, `$helpers` usage)
+  6. Node version warnings (compares typeVersion against highest used in instance)
+  7. Latest execution status summary
+
+### Changed
+- Tool count: 33 → **36** (including the 3 new tools above)
+
 ## [2.4.0] - 2025-03-25
 
 ### Added

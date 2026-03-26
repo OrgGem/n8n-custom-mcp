@@ -88,6 +88,29 @@ AI Agent:
      → Verify it works
 ```
 
+### Scenario 4: Diagnose before execute (NEW v2.5.0)
+
+```
+User: "Deploy and test this social media monitoring workflow"
+
+AI Agent:
+  1. get_node_versions("n8n-nodes-base.httpRequest")
+     → recommendedVersion: 4.2
+  2. get_node_versions("n8n-nodes-base.code")
+     → recommendedVersion: 2
+  3. create_workflow(name: "Social Monitor", nodes: [...])  // uses correct versions
+  4. diagnose_workflow(workflowId)
+     → CRITICAL: Code node "Parser" uses fetch() — BLOCKED in sandbox
+     → WARNING: Node "HTTP Request" using typeVersion 2, but 4.2 available
+  5. patch_workflow_node(nodeName: "Parser", parameters: {jsCode: "...fixed..."})
+  6. diagnose_workflow(workflowId)  // re-check
+     → Healthy! 0 critical, 0 errors
+  7. execute_workflow_and_wait(workflowId)
+     → SUCCESS ✅
+```
+
+**Key insight**: `diagnose_workflow` catches sandbox violations and version mismatches BEFORE execution — saving 3-5 debug iterations.
+
 ---
 
 ## Tips & Tricks
@@ -138,6 +161,37 @@ clone_credentials(source: "existing-wf", target: "new-wf")  → Auto-assigns cre
 
 This saves 5-10 individual `patch_workflow_node` calls.
 
+### 6. Always check node versions before creating workflows
+
+```json
+// BEFORE creating a node, check its latest version:
+get_node_versions("n8n-nodes-base.httpRequest")
+// → { recommendedVersion: 4.2 }
+
+// Then use that version:
+{ "type": "n8n-nodes-base.httpRequest", "typeVersion": 4.2, ... }
+```
+
+Using an outdated `typeVersion` causes invisible errors: wrong parameter schemas, missing features, or silent failures.
+
+### 7. Use `diagnose_workflow` instead of `validate_workflow`
+
+`validate_workflow` only checks structural JSON correctness (local check).
+`diagnose_workflow` checks the LIVE state on n8n: credentials exist, sandbox compatibility, version correctness.
+
+**Always use `diagnose_workflow` after deploying, before executing.**
+
+### 8. Clean up zombie executions
+
+If a workflow stops producing new executions, there may be stuck ones blocking it:
+
+```
+list_executions(workflowId: "...", limit: 5)
+// Find any with finished: false
+delete_execution(ids: ["stuck-id-1", "stuck-id-2"])
+execute_workflow_and_wait(workflowId)  // Works again!
+```
+
 ---
 
 ## System Prompt Template
@@ -147,12 +201,13 @@ Add this to your AI agent's system prompt for optimal n8n-custom-mcp usage:
 ```markdown
 # n8n Workflow Automation Expert
 
-You have access to 34 MCP tools for managing n8n workflows. Follow these rules:
+You have access to 36 MCP tools for managing n8n workflows. Follow these rules:
 
 ## Workflow Creation
-1. Use `get_node_schema` to learn correct parameters before creating nodes
-2. Always `validate_workflow` before deploying
-3. Use `import_template` when a community template exists for the use case
+1. Use `get_node_versions` to get the latest typeVersion — NEVER hardcode versions
+2. Use `get_node_schema` to learn correct parameters before creating nodes
+3. Always `diagnose_workflow` after deploying, before executing
+4. Use `import_template` when a community template exists for the use case
 
 ## Debugging
 1. Start with `get_workflow_summary` to understand the workflow structure

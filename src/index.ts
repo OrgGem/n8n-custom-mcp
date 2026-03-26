@@ -51,7 +51,7 @@ const n8nInternal = axios.create({
 const server = new Server(
   {
     name: 'n8n-custom-mcp',
-    version: '2.4.0',
+    version: '2.5.0',
   },
   {
     capabilities: {
@@ -481,6 +481,45 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             targetWorkflowId: { type: 'string', description: 'Target workflow ID to apply credentials TO' },
           },
           required: ['sourceWorkflowId', 'targetWorkflowId'],
+        },
+      },
+
+      /* EXECUTION MANAGEMENT (NEW v2.5.0) */
+      {
+        name: 'delete_execution',
+        description: 'Delete one or more workflow executions by ID. Essential for cleaning up stuck/zombie executions (finished: false) that block new executions from running. Supports single or bulk deletion.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', description: 'Single execution ID to delete' },
+            ids: { type: 'array', items: { type: 'string' }, description: 'Array of execution IDs to delete in bulk (alternative to single id)' },
+          },
+        },
+      },
+
+      /* NODE VERSION DISCOVERY (NEW v2.5.0) */
+      {
+        name: 'get_node_versions',
+        description: 'Get all available typeVersions for a node type from the n8n instance. Returns the latest version number, all available versions, and default parameters for the latest version. ALWAYS use this before creating workflows to ensure you use the correct typeVersion — using an outdated version causes invisible runtime errors.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            nodeType: { type: 'string', description: 'Full node type name (e.g. "n8n-nodes-base.httpRequest", "n8n-nodes-base.code", "n8n-nodes-base.googleSheets")' },
+          },
+          required: ['nodeType'],
+        },
+      },
+
+      /* DEEP WORKFLOW DIAGNOSIS (NEW v2.5.0) */
+      {
+        name: 'diagnose_workflow',
+        description: 'Deep diagnosis of a deployed workflow. Goes beyond validate_workflow by checking the LIVE state on the n8n instance: (1) structural validation, (2) credential existence check, (3) node typeVersion correctness vs latest available, (4) Code node sandbox compatibility warnings (fetch/$helpers usage), (5) connection integrity (orphan nodes, unreachable paths), (6) latest execution status. Use this BEFORE execute_workflow to catch issues early.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', description: 'Workflow ID to diagnose' },
+          },
+          required: ['id'],
         },
       },
     ],
@@ -1889,6 +1928,359 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       } catch (err: any) {
         return { isError: true, content: [{ type: 'text', text: `Clone Credentials Error: ${err.response?.data?.message || err.message}` }] };
+      }
+    }
+
+    // --- EXECUTION MANAGEMENT (NEW v2.5.0) ---
+    if (name === 'delete_execution') {
+      const { id, ids } = args as any;
+      try {
+        const toDelete: string[] = [];
+        if (id) toDelete.push(id);
+        if (ids && Array.isArray(ids)) toDelete.push(...ids);
+
+        if (toDelete.length === 0) {
+          return { isError: true, content: [{ type: 'text', text: 'Error: Provide either "id" (single) or "ids" (array) of execution IDs to delete.' }] };
+        }
+
+        const results: { id: string; status: string }[] = [];
+        for (const execId of toDelete) {
+          try {
+            await n8n.delete(`/executions/${execId}`);
+            results.push({ id: execId, status: 'deleted' });
+          } catch (err: any) {
+            results.push({ id: execId, status: `error: ${err.response?.data?.message || err.message}` });
+          }
+        }
+
+        const successCount = results.filter(r => r.status === 'deleted').length;
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              success: successCount === toDelete.length,
+              deleted: successCount,
+              total: toDelete.length,
+              results,
+              hint: successCount > 0
+                ? `Deleted ${successCount} execution(s). The workflow can now create new executions.`
+                : 'No executions were deleted. Check the IDs and try again.',
+            }, null, 2)
+          }]
+        };
+      } catch (err: any) {
+        return { isError: true, content: [{ type: 'text', text: `Delete Execution Error: ${err.message}` }] };
+      }
+    }
+
+    // --- NODE VERSION DISCOVERY (NEW v2.5.0) ---
+    if (name === 'get_node_versions') {
+      const { nodeType } = args as any;
+      try {
+        // Strategy 1: Use n8n internal API to get node type info with all versions
+        let nodeData: any = null;
+        try {
+          const response = await n8nInternal.post('/rest/node-types', {
+            nodeFilter: { name: nodeType },
+          });
+          nodeData = response.data;
+        } catch (internalErr: any) {
+          // Fallback: internal API might need session auth
+        }
+
+        // Extract version info
+        let versions: number[] = [];
+        let latestVersion: number | null = null;
+        let defaultParameters: any = null;
+        let displayName: string | null = null;
+        let credentials: any[] = [];
+
+        if (nodeData) {
+          // Internal API returns node type data
+          const nodes = Array.isArray(nodeData) ? nodeData : (nodeData.data ? [nodeData.data] : [nodeData]);
+          const matchingNode = nodes.find((n: any) => n.name === nodeType) || nodes[0];
+
+          if (matchingNode) {
+            // n8n stores version as number or array
+            const ver = matchingNode.version;
+            if (Array.isArray(ver)) {
+              versions = ver.sort((a: number, b: number) => a - b);
+            } else if (typeof ver === 'number') {
+              versions = [ver];
+            }
+            // Some nodes expose defaultVersion
+            latestVersion = matchingNode.defaultVersion || versions[versions.length - 1] || null;
+            displayName = matchingNode.displayName || null;
+            defaultParameters = matchingNode.defaults || null;
+            credentials = (matchingNode.credentials || []).map((c: any) => ({
+              name: c.name,
+              required: c.required || false,
+            }));
+          }
+        }
+
+        // Strategy 2: Also scan existing workflows for real typeVersion usage
+        const allWorkflows: any[] = [];
+        let cursor: string | undefined;
+        do {
+          const params: any = { limit: 100 };
+          if (cursor) params.cursor = cursor;
+          const resp = await n8n.get('/workflows', { params });
+          allWorkflows.push(...(resp.data.data || []));
+          cursor = resp.data.nextCursor;
+        } while (cursor);
+
+        const usedVersions = new Set<number>();
+        const usageExamples: { workflowName: string; nodeName: string; typeVersion: number }[] = [];
+
+        for (const wf of allWorkflows) {
+          if (!wf.nodes) continue;
+          for (const node of wf.nodes) {
+            if (node.type === nodeType && node.typeVersion) {
+              usedVersions.add(node.typeVersion);
+              if (usageExamples.length < 5) {
+                usageExamples.push({
+                  workflowName: wf.name,
+                  nodeName: node.name,
+                  typeVersion: node.typeVersion,
+                });
+              }
+            }
+          }
+        }
+
+        // Merge versions from both sources
+        const allVersions = [...new Set([...versions, ...usedVersions])].sort((a, b) => a - b);
+        const highestUsed = usedVersions.size > 0 ? Math.max(...usedVersions) : null;
+        const recommended = latestVersion || highestUsed || (allVersions.length > 0 ? allVersions[allVersions.length - 1] : null);
+
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              nodeType,
+              displayName,
+              recommendedVersion: recommended,
+              latestFromSchema: latestVersion,
+              highestUsedInWorkflows: highestUsed,
+              allKnownVersions: allVersions,
+              requiredCredentials: credentials,
+              defaultParameters,
+              usageExamples,
+              hint: recommended
+                ? `Use typeVersion: ${recommended} when creating nodes of type "${nodeType}". This is the latest known version.`
+                : `Could not determine versions for "${nodeType}". Check if the node type name is correct (full format: "n8n-nodes-base.nodeName").`,
+            }, null, 2)
+          }]
+        };
+      } catch (err: any) {
+        return { isError: true, content: [{ type: 'text', text: `Get Node Versions Error: ${err.response?.data?.message || err.message}` }] };
+      }
+    }
+
+    // --- DEEP WORKFLOW DIAGNOSIS (NEW v2.5.0) ---
+    if (name === 'diagnose_workflow') {
+      const { id } = args as any;
+      try {
+        const issues: { severity: 'critical' | 'error' | 'warning' | 'info'; category: string; message: string; node?: string }[] = [];
+
+        // 1. Fetch workflow
+        const wfResponse = await n8n.get(`/workflows/${id}`);
+        const wf = wfResponse.data;
+        const nodes = wf.nodes || [];
+        const connections = wf.connections || {};
+
+        // 2. Structural checks
+        const nodeNames = new Set(nodes.map((n: any) => n.name));
+        const hasTrigger = nodes.some((n: any) => (n.type || '').toLowerCase().includes('trigger') || (n.type || '').toLowerCase().includes('webhook'));
+        if (!hasTrigger) issues.push({ severity: 'error', category: 'structure', message: 'No trigger node found. Workflow cannot be activated.' });
+
+        // Check duplicate names
+        const nameCount: Record<string, number> = {};
+        for (const n of nodes) { nameCount[n.name] = (nameCount[n.name] || 0) + 1; }
+        for (const [name, count] of Object.entries(nameCount)) {
+          if (count > 1) issues.push({ severity: 'error', category: 'structure', message: `Duplicate node name: "${name}" (${count} times)`, node: name });
+        }
+
+        // 3. Connection integrity
+        const connectedNodes = new Set<string>();
+        for (const [source, targets] of Object.entries(connections as Record<string, any>)) {
+          connectedNodes.add(source);
+          if (!nodeNames.has(source)) {
+            issues.push({ severity: 'error', category: 'connection', message: `Connection source "${source}" not found in nodes` });
+          }
+          const mainTargets = targets?.main;
+          if (Array.isArray(mainTargets)) {
+            for (const group of mainTargets) {
+              if (Array.isArray(group)) {
+                for (const conn of group) {
+                  if (conn.node) {
+                    connectedNodes.add(conn.node);
+                    if (!nodeNames.has(conn.node)) {
+                      issues.push({ severity: 'error', category: 'connection', message: `Connection target "${conn.node}" not found in nodes`, node: source });
+                    }
+                  }
+                }
+              }
+            }
+          }
+          // Also check ai_languageModel connections
+          const aiTargets = targets?.ai_languageModel;
+          if (Array.isArray(aiTargets)) {
+            for (const group of aiTargets) {
+              if (Array.isArray(group)) {
+                for (const conn of group) {
+                  if (conn.node) connectedNodes.add(conn.node);
+                }
+              }
+            }
+          }
+        }
+
+        // Find orphan nodes
+        for (const node of nodes) {
+          if (!connectedNodes.has(node.name) && !(node.type || '').toLowerCase().includes('trigger') && !(node.type || '').toLowerCase().includes('webhook')) {
+            issues.push({ severity: 'warning', category: 'connection', message: `Orphan node: "${node.name}" has no connections`, node: node.name });
+          }
+        }
+
+        // 4. Credential existence check
+        let allCredentials: any[] = [];
+        try {
+          let credCursor: string | undefined;
+          do {
+            const params: any = { limit: 100 };
+            if (credCursor) params.cursor = credCursor;
+            const credResp = await n8n.get('/credentials', { params });
+            allCredentials.push(...(credResp.data.data || []));
+            credCursor = credResp.data.nextCursor;
+          } while (credCursor);
+        } catch (e) {
+          issues.push({ severity: 'info', category: 'credential', message: 'Could not fetch credentials list (API key may lack credential:list scope)' });
+        }
+
+        const credIds = new Set(allCredentials.map((c: any) => c.id));
+        for (const node of nodes) {
+          if (node.credentials) {
+            for (const [credType, credInfo] of Object.entries(node.credentials as Record<string, any>)) {
+              if (credInfo?.id && !credIds.has(credInfo.id)) {
+                issues.push({ severity: 'critical', category: 'credential', message: `Credential "${credInfo.name || credInfo.id}" (type: ${credType}) not found in n8n. Node will fail at runtime.`, node: node.name });
+              }
+            }
+          }
+        }
+
+        // Nodes that need credentials but don't have them
+        const credRequiredTypes = ['n8n-nodes-base.googleSheets', 'n8n-nodes-base.gmail', 'n8n-nodes-base.slack',
+          '@n8n/n8n-nodes-langchain.lmChatOpenAi', '@n8n/n8n-nodes-langchain.lmChatAnthropic'];
+        for (const node of nodes) {
+          if (credRequiredTypes.some(t => node.type === t) && !node.credentials) {
+            issues.push({ severity: 'error', category: 'credential', message: `Node requires credentials but none assigned`, node: node.name });
+          }
+        }
+
+        // 5. Code node sandbox compatibility
+        for (const node of nodes) {
+          if (node.type === 'n8n-nodes-base.code' && node.parameters?.jsCode) {
+            const code = node.parameters.jsCode;
+            if (code.includes('fetch(') || code.includes('fetch (')) {
+              issues.push({ severity: 'critical', category: 'sandbox', message: 'Code uses fetch() which is BLOCKED in n8n sandbox. Use HTTP Request node instead.', node: node.name });
+            }
+            if (code.includes('$helpers.httpRequest') || code.includes('$helpers.request')) {
+              issues.push({ severity: 'warning', category: 'sandbox', message: 'Code uses $helpers.httpRequest() which may be blocked in strict sandbox environments. Consider HTTP Request node as fallback.', node: node.name });
+            }
+            if (code.includes('require(') || code.includes('import ')) {
+              issues.push({ severity: 'critical', category: 'sandbox', message: 'Code uses require()/import which is BLOCKED in n8n Code node sandbox.', node: node.name });
+            }
+            // Check mode
+            if (!node.parameters.mode || node.parameters.mode !== 'runOnceForAllItems') {
+              issues.push({ severity: 'warning', category: 'config', message: 'Code node missing mode: "runOnceForAllItems". May run per-item unexpectedly.', node: node.name });
+            }
+          }
+        }
+
+        // 6. Node version warnings (scan workflows for highest versions in use)
+        const versionMap: Record<string, number> = {};
+        try {
+          const allWfs: any[] = [];
+          let wfCursor: string | undefined;
+          do {
+            const params: any = { limit: 100 };
+            if (wfCursor) params.cursor = wfCursor;
+            const resp = await n8n.get('/workflows', { params });
+            allWfs.push(...(resp.data.data || []));
+            wfCursor = resp.data.nextCursor;
+          } while (wfCursor);
+
+          for (const w of allWfs) {
+            if (!w.nodes) continue;
+            for (const n of w.nodes) {
+              if (n.type && n.typeVersion) {
+                if (!versionMap[n.type] || n.typeVersion > versionMap[n.type]) {
+                  versionMap[n.type] = n.typeVersion;
+                }
+              }
+            }
+          }
+        } catch (e) { /* ignore scan errors */ }
+
+        for (const node of nodes) {
+          if (node.type && node.typeVersion && versionMap[node.type]) {
+            if (node.typeVersion < versionMap[node.type]) {
+              issues.push({
+                severity: 'warning',
+                category: 'version',
+                message: `Using typeVersion ${node.typeVersion}, but version ${versionMap[node.type]} is used elsewhere. Consider upgrading.`,
+                node: node.name,
+              });
+            }
+          }
+        }
+
+        // 7. Latest execution status
+        let latestExec: any = null;
+        try {
+          const execResp = await n8n.get('/executions', { params: { workflowId: id, limit: 3 } });
+          latestExec = (execResp.data.data || []).map((e: any) => ({
+            id: e.id, status: e.status, finished: e.finished,
+            startedAt: e.startedAt, mode: e.mode,
+          }));
+        } catch (e) { /* ignore */ }
+
+        // Summary
+        const criticalCount = issues.filter(i => i.severity === 'critical').length;
+        const errorCount = issues.filter(i => i.severity === 'error').length;
+        const warningCount = issues.filter(i => i.severity === 'warning').length;
+
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              workflowId: id,
+              workflowName: wf.name,
+              active: wf.active,
+              nodeCount: nodes.length,
+              healthy: criticalCount === 0 && errorCount === 0,
+              summary: {
+                critical: criticalCount,
+                errors: errorCount,
+                warnings: warningCount,
+                info: issues.filter(i => i.severity === 'info').length,
+              },
+              issues: issues.length > 0 ? issues : [{ severity: 'info', category: 'all', message: 'No issues found. Workflow looks healthy!' }],
+              latestExecutions: latestExec,
+              hint: criticalCount > 0
+                ? `CRITICAL: ${criticalCount} critical issue(s) found. Workflow WILL FAIL at runtime. Fix these immediately.`
+                : errorCount > 0
+                  ? `${errorCount} error(s) found. Workflow may fail. Review and fix before executing.`
+                  : warningCount > 0
+                    ? `${warningCount} warning(s) found. Workflow should work but review for best practices.`
+                    : 'Workflow looks healthy! Safe to execute.',
+            }, null, 2)
+          }]
+        };
+      } catch (err: any) {
+        return { isError: true, content: [{ type: 'text', text: `Diagnose Workflow Error: ${err.response?.data?.message || err.message}` }] };
       }
     }
 
