@@ -71,7 +71,7 @@ Multi-stage Dockerfile with [supergateway](https://github.com/nichochar/supergat
 ### Step 1: Clone
 
 ```bash
-git clone https://github.com/duyasia/n8n-custom-mcp.git
+git clone https://github.com/trngthnh369/n8n-custom-mcp.git
 cd n8n-custom-mcp
 ```
 
@@ -310,6 +310,6 @@ Ideas for contribution:
 
 **If useful, please ⭐ star the repo!**
 
-Made with ❤️ by [duyasia](https://github.com/duyasia)
+Made with ❤️ by [trngthnh369](https://github.com/trngthnh369)
 
 </div>
